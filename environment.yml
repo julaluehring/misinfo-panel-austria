@@ -1,0 +1,46 @@
+name: emomis-users
+channels:
+  - defaults
+  - conda-forge
+  - nvidia
+  - anaconda
+dependencies:
+  - python=3.11
+  - pandas
+  - seaborn
+  - matplotlib
+  - tokenizers
+  - ipykernel
+  - dask
+  - polars
+  - pytorch
+  - pytorch-lightning
+  - transformers
+  - tiktoken
+  - protobuf
+  - sentencepiece
+  - r-vars
+  - r-dplyr
+  - r-lubridate
+  - r-base
+  - r-pbapply
+  - r-tsdyn
+  - r-tseries
+  - r-tsa
+  - r-tidyverse
+  - r-urca
+  - r-fracdiff
+  - r-lmtest
+  - r-patchwork
+  - r-tsoutliers
+  - r-forecast
+  - tslearn
+  - r-corrplot
+  - r-gridextra
+  - r-kableextra
+  - r-factoextra
+  - networkx
+  - r-lmertest
+  - r-performance
+  - r-dharma
+  - r-glmmtmb

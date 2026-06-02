@@ -1,0 +1,66 @@
+# ===== SCRIPT OVERVIEW =====
+# Task:   Join top hashtags per day onto the tweet-count outlier table and write
+#         the annotated outlier table as a LaTeX file.
+# Input:  data/Austria-Panel-Count-Outliers.csv  (output of 2-describe_time_series.Rmd)
+#         data/Austria-Panel-Daily-Hashtags.csv   (output of 1b-pull_hashtags.py)
+# Output: output/tables/outliers.tex
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=999)
+```
+
+```{r load packages}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+```
+
+```{r load data}
+src <- "../../data"
+dst <- "../../output"
+
+count_df   <- read.csv(file.path(src, "Austria-Panel-Count-Outliers.csv"))
+hashtags_df <- read.csv(file.path(src, "Austria-Panel-Daily-Hashtags.csv"))
+```
+
+```{r top hashtags per day}
+top_3_per_day <- hashtags_df %>%
+  mutate(hashtag_list = str_split(hashtags, ",")) %>%
+  rowwise() %>%
+  mutate(
+    top_3 = list(
+      hashtag_list %>%
+        table() %>%
+        sort(decreasing = TRUE) %>%
+        names() %>%
+        head(3)
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(top_3 = map(top_3, ~ if(length(.x) < 3) c(.x, rep(NA, 3 - length(.x)))
+                              else .x)) %>%
+  unnest_wider(top_3, names_sep = "_") %>%
+  rename(top_1 = top_3_1, top_2 = top_3_2, top_3 = top_3_3)
+```
+
+```{r join and write table}
+top_3_per_day$day <- as.Date(top_3_per_day$day)
+count_df$day <- as.Date(count_df$day)
+
+count_df <- left_join(count_df, top_3_per_day, by = "day") %>%
+  filter(!format(day, "%m-%d") %in% c("12-24", "12-31")) %>%
+  mutate(hashtags = paste(top_1, top_2, top_3, sep = ",")) %>%
+  dplyr:::select(-top_1, -top_2, -top_3)
+
+latex_table <- count_df %>%
+  dplyr:::select(day, type, coefhat, tstat, hashtags) %>%
+  mutate(hashtags = gsub("مهسا_امینی", "MahsaAmini", hashtags, fixed = TRUE)) %>%
+  kable(format = "latex",
+        booktabs = TRUE,
+        linesep = "")
+
+# Table S3: Detected outliers with top hashtags
+out <- file.path(dst, "outliers.tex")
+writeLines(as.character(latex_table), out)
+```

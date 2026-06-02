@@ -1,0 +1,142 @@
+---
+title: "User Cohort Analysis"
+output: html_document
+---
+
+# ===== SCRIPT OVERVIEW =====
+# Task:   Analyse whether the 2022 structural breaks in untrustworthy news sharing
+#         are driven by new accounts joining vs. behaviour change in existing users.
+#         Produces Figure S10.
+# Input:  data/Austria-Panel-User-Statistics.csv  (output of 10-aggregate_user_stats.py)
+#         data/Austria-Panel-Users-Daily.csv.gz   (output of 4-extract_features.py)
+# Output: output/figures/user_joins.pdf  (Figure S10)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(zoo)
+library(patchwork)
+library(scales)
+
+set.seed(636)
+```
+
+```{r paths}
+src <- "../../data"
+dst <- "../../output"
+```
+
+```{r custom_plot}
+custom_plot <- function() {
+  theme_classic() +
+    theme(
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text.x  = element_text(size = 11),
+      axis.text.y  = element_text(size = 11),
+      legend.title = element_text(size = 12),
+      legend.text  = element_text(size = 11)
+    )
+}
+```
+
+```{r load_data}
+user_data <- read_csv(file.path(src, "Austria-Panel-User-Statistics.csv"))
+
+daily_data <- read_csv(file.path(src, "Austria-Panel-Users-Daily.csv.gz"),
+                      col_types = cols(
+                        author_id = col_double(),
+                        day = col_character(),
+                        .default = col_double()
+                      )) %>%
+  mutate(day = as.Date(day))
+```
+
+# Have new users joined over time?
+
+```{r plot_joins}
+user_data <- user_data %>%
+  mutate(
+    account_created_at = as.Date(account_created),
+    first_tweet_date = as.Date(first_tweet_date),
+    user_type = case_when(
+      account_created_at >= as.Date("2022-01-01") ~ "new",
+      TRUE ~ "old"
+    )
+  )
+
+user_joins <- user_data %>%
+  mutate(join_month = floor_date(account_created_at, "month")) %>%
+  group_by(join_month) %>%
+  summarise(n_new_users = n()) %>%
+  filter(join_month >= as.Date("2019-01-01"))
+
+p_joins <- ggplot(user_joins, aes(x = join_month, y = n_new_users)) +
+  geom_col(fill = "steelblue") +
+  geom_vline(xintercept = as.Date("2022-07-01"),
+             linetype = "dashed", color = "red") +
+  geom_vline(xintercept = as.Date("2022-08-28"),
+             linetype = "dashed", color = "red") +
+  labs(title = "a", x = "month", y = "# of users") +
+  custom_plot() +
+  theme(plot.title = element_text(size = 16, face = "bold"))
+
+post_change_users <- daily_data %>%
+  filter(day >= as.Date("2022-07-01")) %>%
+  distinct(author_id) %>%
+  left_join(user_data %>% select(author_id, account_created_at), by = "author_id") %>%
+  mutate(
+    account_age_at_july2022 = as.numeric(as.Date("2022-07-01") - account_created_at) / 365
+  )
+
+p_ages <- ggplot(post_change_users %>%
+            filter(!is.na(account_age_at_july2022) & account_age_at_july2022 >= 0),
+             aes(x = account_age_at_july2022)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+  labs(title = "b", x = "account age (yrs) as of July 1, 2022", y = "# of users") +
+  custom_plot() +
+  theme(plot.title = element_text(size = 16, face = "bold"))
+```
+
+```{r plot_activity_by_type}
+user_colors <- c("new" = "tomato", "old" = "steelblue")
+
+activity_by_type <- daily_data %>%
+  left_join(user_data %>% select(author_id, user_type), by = "author_id") %>%
+  group_by(day, user_type) %>%
+  summarise(
+    avg_tweets = mean(n_tweets, na.rm = TRUE),
+    avg_untrustworthy = mean(prop_untrustworthy, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_activity <- ggplot(activity_by_type %>% filter(day >= as.Date("2022-01-01")),
+                     aes(x = day, y = avg_tweets, color = user_type)) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = as.Date("2022-07-01"), linetype = "dashed", color = "red") +
+  geom_vline(xintercept = as.Date("2022-08-28"), linetype = "dashed", color = "red") +
+  scale_color_manual(values = user_colors, name = "account age",
+                     labels = c("new" = "new", "old" = "old (>1 year)")) +
+  labs(title = "c", x = "date", y = "# of tweets") +
+  custom_plot() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 16, face = "bold"))
+
+p_decomposition <- ggplot(activity_by_type %>% filter(day >= as.Date("2022-01-01")),
+                          aes(x = day, y = avg_untrustworthy, color = user_type)) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = as.Date("2022-07-01"), linetype = "dashed", color = "red") +
+  geom_vline(xintercept = as.Date("2022-08-28"), linetype = "dashed", color = "red") +
+  scale_color_manual(values = user_colors, name = "account age",
+                     labels = c("new" = "new", "old" = "old (>1 year)")) +
+  labs(title = "d", x = "date", y = "untrustworthy (%)") +
+  custom_plot() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 16, face = "bold"))
+
+ggsave(file.path(dst, "user_joins.pdf"),
+       p_joins / p_ages / p_activity / p_decomposition,
+       width = 6.5, height = 6.5, dpi = 300)
+```

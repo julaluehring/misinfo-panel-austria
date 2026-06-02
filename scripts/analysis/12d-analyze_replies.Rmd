@@ -1,0 +1,268 @@
+# ===== SCRIPT OVERVIEW =====
+# Task:   Analyse the reply network structure: summary statistics, backbone visualisation,
+#         and separate networks for untrustworthy vs. trustworthy news supersharers.
+#         Produces Figure S18 and Table S23 (network statistics comparison).
+# Input:  data/Austria-Panel-Network-Edges.csv.gz       (output of 12a-pull_replies.py)
+#         data/Austria-Panel-Network-Nodes.csv.gz       (output of 12a-pull_replies.py)
+#         data/Austria-Panel-Network-Edges-Internal.csv (output of 12b-pull_replies_internal.py)
+#         data/Austria-Panel-Network-Nodes-Internal.csv (output of 12b-pull_replies_internal.py)
+#         data/Austria-Panel-Supersharers.csv           (output of 11-analyze_supersharers.Rmd)
+#         data/users/reply_analysis_summary.csv         (output of 12a-pull_replies.py)
+# Output: output/figures/edge_node_distributions.pdf
+#         output/figures/combined_supersharer_networks.png
+#         output/tables/network_comparison.tex
+#         output/tables/replies_latex.tex
+
+```{r setup}
+options(scipen=999)
+library(kableExtra)
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(patchwork)
+
+set.seed(636)
+```
+
+```{r paths}
+src <- "../../data"
+dst <- "../../output"
+```
+
+```{r custom_plot}
+custom_plot <- function(plot) {
+  theme_classic() +
+    theme(
+      axis.title.x = element_text(size = 9),
+      axis.title.y = element_text(size = 9),
+      axis.text.x  = element_text(size = 8),
+      axis.text.y  = element_text(size = 8),
+      legend.title = element_text(size = 8),
+      legend.text  = element_text(size = 8)
+    )
+}
+```
+
+```{r load_summary}
+reply_summary <- read.csv(file.path(src, "users", "reply_analysis_summary.csv"))
+head(reply_summary)
+```
+
+## Summary of reply analysis
+```{r summary_table}
+reply_summary <- reply_summary %>%
+  mutate(Metric = case_when(
+    Metric == "Unique users replied to" ~ "Users replied to",
+    Metric == "Users replied to IN sample" ~ "Users replied to in sample",
+    Metric == "Users replied to OUTSIDE sample" ~ "Users replied to outside sample",
+    Metric == "Overlap percentage" ~ "Overlap percentage",
+    Metric == "Replies to users IN sample" ~ "Replies to users in sample",
+    Metric == "Replies to users OUTSIDE sample" ~ "Replies to users outside sample",
+    TRUE ~ Metric
+  ))
+
+# Table S24: Descriptive statistics for Austrian Twitter sample reply network
+replies_latex <- kable(reply_summary,
+                    format = "latex",
+                    booktabs = TRUE,
+                    align = c("l", "c", "r"),
+                    escape = TRUE)
+
+writeLines(as.character(replies_latex), file.path(dst,"replies_latex.tex"))
+```
+
+## Network summary of all users
+
+```{r load_network}
+edges <- read_csv(file.path(src, "Austria-Panel-Network-Edges.csv.gz"))
+nodes <- read_csv(file.path(src, "Austria-Panel-Network-Nodes.csv.gz"))
+nrow(edges); nrow(nodes)
+```
+
+```{r plot_network_summary}
+p_edges <- ggplot(edges, aes(x = edge_type, fill = edge_type)) +
+  geom_bar() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(y = "# of edges", x = "reply direction") +
+  scale_fill_brewer(palette = "Set2") +
+  custom_plot() +
+  theme(legend.position = "none")
+
+p_nodes <- ggplot(nodes, aes(x = n_replies_received + 1, fill = sample_status)) +
+  geom_histogram(bins = 50) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_log10(labels = scales::comma) +
+  facet_wrap(~sample_status) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(x = "# of replies received (log scale)", y = "# of users") +
+  custom_plot() +
+  theme(legend.position = "none")
+
+p_combined <- p_edges + p_nodes + plot_layout(widths = c(1, 2))
+
+ggsave(file.path(dst, "edge_node_distributions.pdf"), p_combined,
+       width = 6.5, height = 3.5)
+```
+
+## Separate networks for supersharers of untrustworthy vs. trustworthy news
+```{r load_internal}
+i_edges <- read_csv(file.path(src, "Austria-Panel-Network-Edges-Internal.csv"))
+i_nodes <- read_csv(file.path(src, "Austria-Panel-Network-Nodes-Internal.csv"))
+nrow(i_edges); nrow(i_nodes)
+```
+
+```{r load_supersharers}
+supersharers <- read_csv(file.path(src, "Austria-Panel-Supersharers.csv"),
+                       col_types = cols(
+                         author_id = col_double(),
+                         group = col_factor(levels = c("Trustworthy", "Untrustworthy"))
+                       ))
+
+untrustworthy_sharers <- supersharers %>%
+  filter(group == "Untrustworthy") %>%
+  pull(author_id)
+
+trustworthy_sharers <- supersharers %>%
+  filter(group == "Trustworthy") %>%
+  pull(author_id)
+
+untrustworthy_edges <- i_edges %>%
+  filter(author_id %in% untrustworthy_sharers &
+         in_reply_to_user_id %in% untrustworthy_sharers)
+
+untrustworthy_nodes <- i_nodes %>%
+  filter(user_id %in% c(untrustworthy_edges$author_id,
+                        untrustworthy_edges$in_reply_to_user_id))
+
+nrow(untrustworthy_edges); nrow(untrustworthy_nodes)
+```
+
+```{r plot_untrustworthy_network}
+g_untrustworthy <- graph_from_data_frame(
+  d = untrustworthy_edges,
+  vertices = untrustworthy_nodes,
+  directed = TRUE
+)
+
+p_untrustworthy <- ggraph(g_untrustworthy, layout = "fr") +
+  geom_edge_link(aes(width = log(weight)), alpha = 0.6, color = "gray70") +
+  geom_node_point(aes(size = log(total_degree + 1)), color = "#8b7ab8", alpha = 0.8) +
+  scale_edge_width_continuous(range = c(0.2, 2)) +
+  scale_size_continuous(range = c(0.5, 5)) +
+  labs(title = "a. supersharers of 80%\n untrustworthy vs.",
+       subtitle = sprintf("(%s edges, %s nodes)",
+                         nrow(untrustworthy_edges), nrow(untrustworthy_nodes))) +
+  theme_graph() +
+  theme(legend.position = "none")
+```
+
+```{r plot_trustworthy_network}
+trustworthy_edges <- i_edges %>%
+  filter(author_id %in% trustworthy_sharers &
+         in_reply_to_user_id %in% trustworthy_sharers)
+
+trustworthy_nodes <- i_nodes %>%
+  filter(user_id %in% c(trustworthy_edges$author_id,
+                        trustworthy_edges$in_reply_to_user_id))
+nrow(trustworthy_edges); nrow(trustworthy_nodes)
+
+g_trustworthy <- graph_from_data_frame(
+  d = trustworthy_edges,
+  vertices = trustworthy_nodes,
+  directed = TRUE
+)
+
+p_trustworthy <- ggraph(g_trustworthy, layout = "fr") +
+  geom_edge_link(aes(width = log(weight)), alpha = 0.5, color = "gray70") +
+  geom_node_point(aes(size = log(total_degree + 1)), color = "#1b9e77", alpha = 0.8) +
+  scale_edge_width_continuous(range = c(0.2, 2)) +
+  scale_size_continuous(range = c(0.5, 5)) +
+  labs(title = "b. 80% of trustworthy news",
+       subtitle = sprintf("(%s edges, %s nodes)",
+                         nrow(trustworthy_edges), nrow(trustworthy_nodes))) +
+  theme_graph() +
+  theme(legend.position = "none")
+
+p_combined_networks <- p_untrustworthy + p_trustworthy +
+  plot_layout(widths = c(1, 2), ncol = 2)
+
+ggsave(file.path(dst, "combined_supersharer_networks.png"),
+       p_combined_networks, width = 6.5, height = 4)
+```
+
+### Network statistics comparison (Table S23)
+```{r network_stats}
+compute_network_stats <- function(g, network_name) {
+  n_nodes <- vcount(g)
+  n_edges <- ecount(g)
+  density <- edge_density(g)
+  deg_all <- degree(g, mode = "all")
+  reciprocity_val <- reciprocity(g)
+  components_weak <- components(g, mode = "weak")
+  gcc_size <- max(components_weak$csize)
+  gcc_prop <- gcc_size / n_nodes
+  gcc_nodes <- which(components_weak$membership == which.max(components_weak$csize))
+  g_gcc <- induced_subgraph(g, gcc_nodes)
+  transitivity_global <- transitivity(g, type = "global")
+  avg_path_length <- if (vcount(g_gcc) > 0 && ecount(g_gcc) > 0)
+    mean_distance(g_gcc, directed = TRUE) else NA
+
+  data.frame(
+    Network = network_name,
+    Nodes = n_nodes,
+    Edges = n_edges,
+    Density = density,
+    Mean_Degree = mean(deg_all),
+    Reciprocity = reciprocity_val,
+    Giant_Component_Size = gcc_size,
+    Giant_Component_Proportion = gcc_prop,
+    Global_Clustering = transitivity_global,
+    Avg_Path_Length = avg_path_length,
+    Max_Kcore = max(coreness(g, mode = "all"))
+  )
+}
+
+untrustworthy_stats <- compute_network_stats(g_untrustworthy, "Untrustworthy")
+trustworthy_stats <- compute_network_stats(g_trustworthy, "Trustworthy")
+
+network_comparison <- rbind(untrustworthy_stats, trustworthy_stats)
+print(network_comparison)
+
+summary_table <- data.frame(
+  Metric = c("Nodes", "Edges", "Density", "Mean Degree",
+             "Reciprocity", "Giant Component (%)",
+             "Global Clustering", "Avg Path Length", "Max K-core"),
+  Untrustworthy = c(
+    format(untrustworthy_stats$Nodes, big.mark = ","),
+    format(untrustworthy_stats$Edges, big.mark = ","),
+    sprintf("%.3f", untrustworthy_stats$Density),
+    sprintf("%.3f", untrustworthy_stats$Mean_Degree),
+    sprintf("%.3f", untrustworthy_stats$Reciprocity),
+    sprintf("%.1f%%", untrustworthy_stats$Giant_Component_Proportion * 100),
+    sprintf("%.3f", untrustworthy_stats$Global_Clustering),
+    sprintf("%.3f", untrustworthy_stats$Avg_Path_Length),
+    untrustworthy_stats$Max_Kcore
+  ),
+  Trustworthy = c(
+    format(trustworthy_stats$Nodes, big.mark = ","),
+    format(trustworthy_stats$Edges, big.mark = ","),
+    sprintf("%.3f", trustworthy_stats$Density),
+    sprintf("%.3f", trustworthy_stats$Mean_Degree),
+    sprintf("%.3f", trustworthy_stats$Reciprocity),
+    sprintf("%.1f%%", trustworthy_stats$Giant_Component_Proportion * 100),
+    sprintf("%.3f", trustworthy_stats$Global_Clustering),
+    sprintf("%.3f", trustworthy_stats$Avg_Path_Length),
+    trustworthy_stats$Max_Kcore
+  )
+)
+
+# Table S23: Network statistics comparison (untrustworthy vs. trustworthy supersharers)
+summary_latex <- kable(summary_table,
+                      format = "latex",
+                      booktabs = TRUE,
+                      align = c("l", "r", "r"),
+                      escape = TRUE)
+
+writeLines(as.character(summary_latex),
+           file.path(dst,  "network_comparison.tex"))
+```

@@ -1,0 +1,295 @@
+# ===== SCRIPT OVERVIEW =====
+# Task:   Analyse domain trustworthiness distribution and changes over time.
+#         Focuses on June–September 2022 period.
+# Input:  data/Austria-Panel-Tweets-Domains-Change-2022.csv.gz
+#         data/Austria-Panel-Daily-Hashtags.csv
+# Output: ./domains/domains_classification_prop.png
+#         ./domains/domains_classification_raw.png / .pdf
+#         ./domains/untrustworthy_domains_spikes.png
+#         ./domains/top_hashtags_on_spike_days.csv
+#         output/figures/domains_classification_prop.pdf
+#         output/figures/untrustworthy_domains_spikes.pdf
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE,
+                      fig.width = 6.5, 
+                      fig.height = 4.5)
+options(scipen=999)
+```
+
+```{r load packages}
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+library(kableExtra)
+```
+
+```{r paths}
+src <- "../../data"
+dst <- "../../output"
+```
+
+```{r custom plots}
+custom_plot <- function() {
+  theme_classic() +  
+    theme(
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text.x  = element_text(size = 11),
+      axis.text.y  = element_text(size = 11),
+      legend.title = element_text(size = 12),
+      legend.text  = element_text(size = 11)
+    )
+}
+
+```
+
+```{r filter data}
+# filter the main tweet-domain file to the Jun–Oct 2022 structural break period
+authors_filtered <- read_csv(file.path(src, "authors_filtered.csv"),
+                             col_types = cols(author_id = col_character())) %>%
+  pull(author_id)
+
+read_csv(
+  file.path(src, "Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz"),
+  col_select = c(author_id, created_at, ng_domain, Score),
+  col_types = cols(author_id = col_character(),
+                   created_at = col_character(),
+                   ng_domain  = col_character(),
+                   Score      = col_double())
+) %>%
+  filter(!is.na(ng_domain), !is.na(Score)) %>%
+  filter(author_id %in% authors_filtered) %>%
+  mutate(day = as.Date(str_sub(created_at, 1, 10))) %>%
+  filter(day >= as.Date("2022-06-01"), day < as.Date("2022-11-01")) %>%
+  select(day, ng_domain, Score) %>%
+  write_csv(file.path(src, "Austria-Panel-Tweets-Domains-Change-2022.csv.gz"))
+```
+
+```{r}
+domains <- read.csv(file.path(src, "Austria-Panel-Tweets-Domains-Change-2022.csv.gz"))
+
+domains_per_day <- domains %>%
+  separate_rows(ng_domain, sep = ", ") %>%
+  group_by(day, ng_domain) %>%
+  summarise(
+    Score = first(Score),
+    n_used = n(),
+    .groups = 'drop')
+```
+
+```{r}
+cutoff_july <- as.Date("2022-07-01")
+cutoff_august <- as.Date("2022-08-28")
+
+untrustworthy_trends <- domains_per_day %>%
+  filter(Score < 60) %>%
+  arrange(day, desc(n_used))
+
+untrustworthy_before_after <- domains_per_day %>%
+  filter(Score < 60) %>%
+  mutate(period = if_else(day < cutoff_july, "before", "after")) %>%
+  group_by(period, ng_domain, Score) %>%
+  summarise(total_uses = sum(n_used), .groups = 'drop') %>%
+  pivot_wider(names_from = period, values_from = total_uses, values_fill = 0) %>%
+  mutate(
+    change = after - before,
+    pct_change = if_else(before > 0, (after - before) / before * 100, NA_real_)
+  ) %>%
+  arrange(desc(after))
+
+untrustworthy_before_after%>%
+  arrange(desc(pct_change))%>%
+  print(n=30)
+```
+
+
+## Classify untrustworthy domains 
+```{r}
+# step 1: Get scores in the week before and week after cutoff for each domain
+domain_classification <- domains_per_day %>%
+  arrange(ng_domain, day) %>%
+  group_by(ng_domain) %>%
+  mutate(
+    prev_score = lag(Score),
+    first_appearance = (row_number() == 1),
+    classification = case_when(
+      # first time this domain appears and score < 60
+      first_appearance & Score < 60 ~ "first",
+      # previously had score >= 60, now < 60
+      !is.na(prev_score) & prev_score >= 60 & Score < 60 ~ "downrated",
+      # previously had score < 60, still < 60
+      !is.na(prev_score) & prev_score < 60 & Score < 60 ~ "stable",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Step 2: Apply classification to ALL daily data where Score < 60
+stacked_data_daily <- domain_classification %>%
+  filter(Score < 60 & classification %in% c("first", "downrated", "stable")) %>%
+  group_by(day, classification) %>%
+  summarise(n_domains = sum(n_used), .groups = 'drop') %>%
+  mutate(day = as.Date(day))
+
+# Step 3: Plot proportions over ALL time
+p_proportions <- ggplot(stacked_data_daily, aes(x = day, y = n_domains, fill = classification)) +
+  geom_area(position = "fill") +
+  scale_fill_manual(values = c(
+    "first" = "#8da0cb", 
+    "downrated" = "#fc8d62", 
+    "stable" = "#66c2a5"
+  )) +
+  scale_y_continuous(labels = scales::percent) +
+  geom_vline(xintercept = cutoff_july, linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = cutoff_august, linetype = "dashed", color = "black", size = 1) +
+  labs(
+    x = "time in days",
+    y = "untrustworthy domains\nshared (%)",
+    fill = "classification",
+  ) +
+  custom_plot()
+
+ggsave(file.path(dst,"domains_classification_prop.pdf"), 
+       plot = p_proportions, 
+       width = 6.5, height = 3)
+```
+
+```{r}
+# Step 4: Plot raw numbers
+p_raw <- ggplot(stacked_data_daily, aes(x = day, y = n_domains, fill = classification)) +
+  geom_area() +
+  scale_fill_manual(values = c(
+    "first" = "#8da0cb", 
+    "downrated" = "#fc8d62", 
+    "stable" = "#66c2a5"
+  )) +
+  labs(
+    x = "time in days",
+    y = "untrustworthy domains\nshared (#)",
+    fill = "classification",
+  ) +
+  geom_vline(xintercept = cutoff_july, linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = cutoff_august, linetype = "dashed", color = "black", size = 1) +
+  custom_plot()
+
+#save as pdf
+ggsave(file.path(dst, "domains_classification_raw.pdf"),
+       plot = p_raw, 
+       width = 6.5, height = 3)
+```
+```{r}
+# Calculate total untrustworthy domains per day
+daily_totals <- stacked_data_daily %>%
+  group_by(day) %>%
+  summarise(total_untrustworthy = sum(n_domains)) %>%
+  arrange(day)
+
+# Identify spike days - let's use 90th percentile as threshold
+spike_threshold <- quantile(daily_totals$total_untrustworthy, 0.9, na.rm = TRUE)
+
+spike_days <- daily_totals %>%
+  filter(total_untrustworthy > spike_threshold) %>%
+  pull(day)
+
+print(spike_days)
+```
+```{r}
+p_spikes <- ggplot(daily_totals, aes(x = day, y = total_untrustworthy)) +
+  geom_line() +
+  geom_hline(yintercept = spike_threshold, linetype = "dashed", color = "red") +
+  geom_point(data = daily_totals %>% filter(day %in% spike_days), 
+             aes(x = day, y = total_untrustworthy), color = "red", size = 2) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  labs(x = "time", y = "untrustworthy domains\n shared (#)") +
+  custom_plot()
+
+ggsave(file.path(dst, "untrustworthy_domains_spikes.pdf"),
+         plot = p_spikes, 
+         width = 6.5, height = 3)
+```
+
+
+## Domains on spike days
+```{r}
+# which untrustworthy domains were shared on the spike days? 
+domains_on_spike_days <- domains_per_day %>%
+  mutate(day = as.Date(day)) %>%
+  filter(day %in% spike_days & Score < 60) %>%
+  group_by(ng_domain, Score) %>%
+  summarise(
+    total_uses = sum(n_used),
+    n_spike_days = n_distinct(day),
+    avg_uses_per_spike_day = mean(n_used),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(n_spike_days))
+
+print(domains_on_spike_days, n = 10)
+```
+
+```{r}
+# compare to baseline - what domains are shared more on spike days vs normal days?
+normal_days <- daily_totals %>%
+  filter(total_untrustworthy <= spike_threshold) %>%
+  pull(day)
+
+domains_normal_days <- domains_per_day %>%
+  mutate(day = as.Date(day)) %>%
+  filter(day %in% normal_days & Score < 60) %>%
+  group_by(ng_domain) %>%
+  summarise(
+    avg_uses_normal = mean(n_used),
+    .groups = 'drop'
+  )
+
+comparison <- domains_on_spike_days %>%
+  left_join(domains_normal_days, by = "ng_domain") %>%
+  mutate(
+    spike_increase = avg_uses_per_spike_day - coalesce(avg_uses_normal, 0),
+    spike_ratio = avg_uses_per_spike_day / coalesce(avg_uses_normal, 0.1)
+  ) %>%
+  arrange(desc(spike_increase))
+
+# print the new columns
+print(comparison %>% dplyr::select(ng_domain, avg_uses_per_spike_day, avg_uses_normal, spike_increase, spike_ratio), n = 10)
+```
+
+
+## Check out hashtags on those days
+```{r}
+hashtags_df <- read.csv(file.path(src, "Austria-Panel-Daily-Hashtags.csv")) %>%
+  mutate(day = as.Date(day))%>%
+  filter(day %in% spike_days)
+```
+
+```{r}
+top_3_per_day <- hashtags_df %>%
+  mutate(hashtag_list = str_split(hashtags, ",")) %>%
+  rowwise() %>%
+  mutate(
+    top_3 = list(
+      hashtag_list %>%
+        table() %>%
+        sort(decreasing = TRUE) %>%
+        names() %>%
+        head(3)
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(top_3 = map(top_3, ~ if(length(.x) < 3) c(.x, rep(NA, 3 - length(.x))) 
+                              else .x)) %>%
+  unnest_wider(top_3, names_sep = "_") %>%
+  rename(top_1 = top_3_1, top_2 = top_3_2, top_3 = top_3_3)
+
+top_3_per_day %>%
+  dplyr::select(day, top_1, top_2, top_3) %>%
+  write.csv(file = file.path("domains", "top_hashtags_on_spike_days.csv"),
+            row.names = FALSE)
+```
+
+

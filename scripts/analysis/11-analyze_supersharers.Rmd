@@ -1,0 +1,486 @@
+# ===== SCRIPT OVERVIEW =====
+# Task:   Identify misinformation supersharers (users responsible for top 80% of
+#         misinformation sharing) and compare their emotion features to other users.
+#         PIPELINE NOTE: this script writes Austria-Panel-Supersharers.csv which is
+#         required by pull_sources.py and pull_supersharer_tweets.py — run before them.
+# Input:  data/Austria-Panel-Users-Daily.csv.gz
+#         data/Austria-Panel-Users-Features-Tweet.csv
+# Output: data/Austria-Panel-Supersharers.csv
+#         ./users/supersharers_cdf.png
+#         ./users/supersharers_emotion_comparison.png
+#         output/figures/supersharers_cdf.pdf
+#         output/figures/supersharers_emotion_comparison.pdf
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.width = 6.5,
+                      fig.height = 4.5)
+set.seed(123)
+```
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+library(broom)
+```
+
+```{r}
+custom_plot <- function() {
+  theme_classic() +
+    theme(
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text.x  = element_text(size = 11),
+      axis.text.y  = element_text(size = 11),
+      legend.title = element_text(size = 12),
+      legend.text  = element_text(size = 11)
+    )
+}
+```
+
+```{r}
+src <- "../../data"
+dst <- "../../output"
+
+dir.create("./users", showWarnings = FALSE, recursive = TRUE)
+```
+
+## User data
+```{r}
+users <- read_csv(file.path(src, "Austria-Panel-Users-Daily.csv.gz"),
+                     col_types = cols(
+                        author_id = col_character(),
+                        day = col_character(),
+                        .default = col_double())
+                      ) 
+nrow(users)
+```
+
+```{r}
+features <- read_csv(file.path(src, "Austria-Panel-Users-Features-Tweet.csv"),
+                     col_types = cols(
+                        author_id = col_character(),
+                        .default = col_double())
+                      )
+
+features$shares_news <- as.integer(features$n_news_shared > 0)
+features$shares_biased <- as.integer(features$n_biased_shared > 0)
+features$shares_untrustworthy <- as.integer(features$n_untrustworthy_shared > 0)
+```
+
+# ===== CONCENTRATION ANALYSIS =====
+```{r}
+# get total number of misinfo shared per user per day
+users_summary <- users %>%
+  group_by(author_id) %>%
+  summarise(
+    total_misinfo_count = sum(n_untrustworthy, na.rm = TRUE),
+    total_trustworthy_count = sum(n_trustworthy, na.rm = TRUE),
+    total_news_count = sum(n_news, na.rm = TRUE),
+    total_biased_count = sum(n_biased, na.rm = TRUE)
+  ) %>%
+  ungroup()
+  
+head(users_summary,2)
+```
+
+```{r}
+untrustworthy_by_user <- users_summary %>%
+  dplyr:::select(author_id, total_misinfo_count) %>%  
+  arrange(desc(total_misinfo_count)) %>%
+  mutate(
+    cumsum_count = cumsum(total_misinfo_count),
+    cumsum_prop = cumsum_count / sum(total_misinfo_count),
+    user_rank = row_number(),
+    percentile = user_rank / n() * 100,
+    source_type = "Untrustworthy"
+  )
+
+threshold_untrustworthy <- min(which(untrustworthy_by_user$cumsum_prop >= 0.80))
+percentile_untrustworthy <- untrustworthy_by_user$percentile[threshold_untrustworthy]
+untrustworthy_supersharers <- untrustworthy_by_user %>%
+  slice(1:threshold_untrustworthy)
+```
+
+```{r}
+trustworthy_by_user <- users_summary %>%
+  dplyr:::select(author_id, total_trustworthy_count) %>%  
+  filter(total_trustworthy_count > 0) %>%
+  arrange(desc(total_trustworthy_count)) %>%
+  mutate(
+    cumsum_count = cumsum(total_trustworthy_count),
+    cumsum_prop = cumsum_count / sum(total_trustworthy_count),
+    user_rank = row_number(),
+    percentile = user_rank / n() * 100,
+    source_type = "Trustworthy"
+  )
+
+threshold_trustworthy <- min(which(trustworthy_by_user$cumsum_prop >= 0.80))
+percentile_trustworthy <- trustworthy_by_user$percentile[threshold_trustworthy]
+
+trustworthy_supersharers <- trustworthy_by_user %>%
+  slice(1:threshold_trustworthy)
+```
+
+
+```{r}
+users_combined <- bind_rows(untrustworthy_by_user, trustworthy_by_user)
+
+# plot cumulative distribution
+p_cd <- ggplot(users_combined, 
+                aes(x = percentile, 
+                    y = cumsum_prop,
+                    color = source_type)) +
+  geom_line(linewidth=1) +
+  geom_hline(yintercept = 0.8, 
+              linetype = "dashed", 
+              color = "black") +
+  scale_color_manual(
+    values = c("Trustworthy" = "#2a9d8f", 
+               "Untrustworthy" = "#8b7ab8")
+  ) +
+  labs(
+    x = "users (%)",
+    y = "news shared (%)",
+    color = NULL
+  ) +
+  custom_plot()+
+  # adjust legend position to be bottom right corner
+  theme(legend.position = c(0.85, 0.1))+
+  #annotation with number of users sharing 80% of misinfo
+  annotate("text", 
+           x = 15, y = 0.83,
+           label = paste0(round(percentile_untrustworthy, 2), "% vs ", round(percentile_trustworthy, 2), "% of users"),
+           size = 4,
+           hjust = 0)
+
+ggsave(file.path(dst, "supersharers_cdf.pdf"),
+       plot = p_cd,
+       width = 6.5, height = 4)
+```
+
+
+# ===== SUPERSHARER ANALYSIS =====
+
+```{r}
+# get the ppl sharing 80% of misinfo
+# and add their features
+untrustworthy_supersharers <- untrustworthy_supersharers %>%
+  inner_join(features, by = "author_id") %>%
+  mutate(group = "Untrustworthy")
+
+# get people who are the supersharers of trustworthy info
+trustworthy_supersharers <- trustworthy_supersharers %>%
+  inner_join(features, by = "author_id") %>%
+  mutate(group = "Trustworthy")
+
+supersharers <- bind_rows(untrustworthy_supersharers, trustworthy_supersharers)
+nrow(supersharers)
+```
+```{r}
+# save as csv 
+write_csv(supersharers, 
+          file.path(src, "Austria-Panel-Supersharers.csv"))
+```
+```{r}
+anger_data <- supersharers %>%
+  dplyr:::select(author_id, group,
+         anger_baseline, anger_variability, anger_instability, anger_inertia) %>%
+  pivot_longer(cols = c(anger_baseline, anger_variability, anger_instability, anger_inertia),
+               names_to = "metric",
+               values_to = "value") %>%
+  mutate(
+    metric = gsub("anger_", "", metric),
+    metric = factor(metric, levels = c("baseline", "variability", "instability", "inertia")),
+    emotion = "Anger"
+  )
+
+fear_data <- supersharers %>%
+  dplyr:::select(author_id, group,
+         fear_baseline, fear_variability, fear_instability, fear_inertia) %>%
+  pivot_longer(cols = c(fear_baseline, fear_variability, fear_instability, fear_inertia),
+               names_to = "metric",
+               values_to = "value") %>%
+  mutate(
+    metric = gsub("fear_", "", metric),
+    metric = factor(metric, levels = c("baseline", "variability", "instability", "inertia")),
+    emotion = "Fear"
+  )
+
+anger_stats <- anger_data %>%
+  group_by(group, metric) %>%
+  summarise(
+    n = n(),
+    mean_value = mean(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    metric_label = tools::toTitleCase(as.character(metric))
+  )
+
+# Calculate stats for fear
+fear_stats <- fear_data %>%
+  group_by(group, metric) %>%
+  summarise(
+    mean_value = mean(value, na.rm = TRUE),
+    std_value = sd(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    metric_label = tools::toTitleCase(as.character(metric))
+  )
+
+anger_plot_data <- anger_data %>%
+  left_join(anger_stats, by = c("group", "metric"))
+
+fear_plot_data <- fear_data %>%
+  left_join(fear_stats, by = c("group", "metric"))
+```
+
+
+```{r}
+run_tests <- function(data, emotion_name) {
+  results <- data %>%
+    group_by(metric_label) %>%
+    nest() %>%
+    mutate(
+      # Wilcoxon test (non-parametric, good for distributions)
+      wilcox_test = map(data, ~{
+        trustworthy <- .x %>% filter(group == "Trustworthy") %>% pull(value)
+        untrustworthy <- .x %>% filter(group == "Untrustworthy") %>% pull(value)
+        wilcox.test(trustworthy, untrustworthy)
+      }),
+    
+      p_value = map_dbl(wilcox_test, ~.x$p.value),
+      significance = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01 ~ "**",
+        p_value < 0.05 ~ "*",
+        TRUE ~ "ns"
+      ),
+      
+      emotion = emotion_name
+    ) %>%
+    dplyr:::select(metric_label, p_value, significance, emotion)
+  
+  return(results)
+}
+
+anger_tests <- run_tests(anger_plot_data, "anger")
+fear_tests <- run_tests(fear_plot_data, "fear")
+
+all_tests <- bind_rows(anger_tests, fear_tests)
+
+print(all_tests)
+```
+
+
+```{r}
+# Calculate density and extract peaks for anger
+anger_density <- anger_plot_data %>%
+  group_by(metric_label, group) %>%
+  do({
+    d <- density(.$value, na.rm = TRUE)
+    data.frame(x = d$x, density = d$y)
+  }) %>%
+  ungroup()
+
+anger_peaks <- anger_density %>%
+  group_by(metric_label, group) %>%
+  slice_max(density, n = 1) %>%
+  ungroup() %>%
+  select(metric_label, group, peak_x = x, peak_y = density)
+
+# Calculate density and extract peaks for fear
+fear_density <- fear_plot_data %>%
+  group_by(metric_label, group) %>%
+  do({
+    d <- density(.$value, na.rm = TRUE)
+    data.frame(x = d$x, density = d$y)
+  }) %>%
+  ungroup()
+
+fear_peaks <- fear_density %>%
+  group_by(metric_label, group) %>%
+  slice_max(density, n = 1) %>%
+  ungroup() %>%
+  select(metric_label, group, peak_x = x, peak_y = density)
+```
+```{r}
+group_colors <- c(
+  "Untrustworthy" = "#8b7ab8",
+  "Trustworthy" = "#1b9e77"
+)
+
+group_sizes <- supersharers %>%
+  group_by(group) %>%
+  summarize(n = n(), .groups = "drop")
+
+legend_labels <- group_sizes %>%
+  mutate(legend_label = sprintf("%s (n=%s)", group, scales::comma(n)))
+
+legend_mapping <- setNames(legend_labels$legend_label, group_sizes$group)
+
+anger_stars <- anger_tests %>%
+  left_join(
+    anger_stats %>% 
+      select(metric_label, group, mean_value) %>%
+      pivot_wider(names_from = group, values_from = mean_value),
+    by = "metric_label"
+  ) %>%
+  left_join(
+    anger_peaks %>%
+      group_by(metric_label) %>%
+      slice_max(peak_y, n = 1) %>%
+      dplyr:::select(metric_label, peak_y),
+    by = "metric_label"
+  ) %>%
+  mutate(
+    x = pmax(Trustworthy, Untrustworthy) + 0.01,  
+    y = peak_y * 0.99, 
+    label = significance
+  )
+
+fear_stars <- fear_tests %>%
+  left_join(
+    fear_stats %>% 
+      select(metric_label, group, mean_value) %>%
+      pivot_wider(names_from = group, values_from = mean_value),
+    by = "metric_label"
+  ) %>%
+  left_join(
+    fear_peaks %>%
+      group_by(metric_label) %>%
+      slice_max(peak_y, n = 1) %>%
+      select(metric_label, peak_y),
+    by = "metric_label"
+  ) %>%
+  mutate(
+    x = pmax(Trustworthy, Untrustworthy) + 0.01,
+    y = peak_y * 0.99,
+    label = significance
+  )
+
+p_anger <- ggplot(anger_plot_data, aes(x = value, fill = group, color = group)) +
+  geom_density(alpha = 0.4, linewidth = 0.5) +
+  geom_vline(data = anger_stats,
+             aes(xintercept = mean_value, 
+             color = group), 
+             linetype = "dashed", linewidth = 0.8) +
+  geom_text(data = anger_stats %>% filter(group == "Untrustworthy"),
+            aes(x = Inf, y = Inf, 
+                label = paste0("M=", round(mean_value, 3))),
+            vjust = 1.3, hjust = 2.2, size = 3, 
+            color = group_colors["Untrustworthy"],
+            inherit.aes = FALSE) +
+  geom_text(data = anger_stats %>% filter(group == "Trustworthy"),
+            aes(x = Inf, y = Inf, 
+                label = paste0("M=", round(mean_value, 3))),
+            vjust = 2.9, hjust = 2.2, size = 3, 
+            color = group_colors["Trustworthy"],
+            inherit.aes = FALSE) +
+  geom_text(data = anger_stars,
+            aes(x = x, y = y, label = label),
+            size = 3, 
+            hjust = 0,
+            vjust = 0.5,
+            inherit.aes = FALSE) +
+  facet_wrap(~metric_label, ncol = 1, 
+                            scales = "free_y", 
+                            strip.position = "left") +
+  scale_x_continuous(limits = c(-0.25, 0.75)) +
+  scale_fill_manual(values = group_colors, labels = legend_mapping) +  # Added labels
+  scale_color_manual(values = group_colors, labels = legend_mapping) + 
+  labs(x = "Value", y = NULL, 
+       fill = NULL, 
+       color = NULL, 
+       title = "a. anger") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid = element_blank(),
+   strip.text.y.left = element_text(size = 8, angle = 90, 
+                                    hjust = 0.5, vjust = 0.5),
+    strip.background = element_rect(
+                          fill = "white", 
+                          color = "black"),
+    legend.position = c(1.1, -0.14),  # x=0.5 (center), y=1.02 (slightly above plot)
+    legend.direction = "horizontal",
+    plot.margin = margin(t = 5, r = 5, b = 20, l = 5, unit = "pt"),
+    axis.text.x = element_text(size = 7),
+    axis.line.x = element_line(color = "black"),
+    panel.spacing = unit(0.5, "lines"),
+    plot.title = element_text(size = 11, face = "bold")
+  )
+
+# Create fear plot (Plot B)
+p_fear <- ggplot(fear_plot_data,
+                  aes(x = value, 
+                      fill = group, 
+                      color = group)) +
+  geom_density(alpha = 0.4, linewidth = 0.5) +
+  geom_vline(data = fear_stats,
+             aes(xintercept = mean_value,
+                 color = group), 
+                 linetype = "dashed", 
+                 linewidth = 0.8) +
+  geom_text(data = fear_stats %>% filter(group == "Untrustworthy"),
+            aes(x = Inf, y = Inf, 
+                label = paste0("M=", round(mean_value, 3))),
+            vjust = 1.3, hjust = 2.2, size = 3, color = group_colors["Untrustworthy"],
+            inherit.aes = FALSE) +
+  geom_text(data = fear_stats %>% filter(group == "Trustworthy"),
+            aes(x = Inf, y = Inf, 
+                label = paste0("M=", round(mean_value, 3))),
+            vjust = 2.9, hjust = 2.2, size = 3, color = group_colors["Trustworthy"],
+            inherit.aes = FALSE) +
+  geom_text(data = fear_stars,
+            aes(x = x, y = y, label = label),
+            size = 3, 
+            hjust = 0,
+            vjust = 0.5,
+            inherit.aes = FALSE) +
+  facet_wrap(~metric_label, 
+                ncol = 1, 
+                scales = "free_y", 
+                strip.position = "left") +
+  scale_x_continuous(limits = c(-0.25, 0.75)) +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(x = "Value", y = NULL, 
+       fill = "Group", 
+       color = "Group",
+       title = "b. fear") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid = element_blank(),
+    strip.text.y.left = element_text(size = 8, angle = 90, hjust = 0.5, vjust = 0.5),
+    strip.background = element_rect(fill = "white", color = "black"),
+    legend.position = "none",
+    axis.text.x = element_text(size = 7),
+    axis.line.x = element_line(color = "black"),
+    panel.spacing = unit(0.5, "lines"),
+    plot.title = element_text(size = 11, face = "bold")
+  )
+
+
+p_combined <- p_anger + p_fear + plot_layout(ncol = 2)
+print(p_combined)
+```
+
+```{r}
+# save as pdf in paper repository
+ggsave(file.path(dst, "supersharers_emotion_comparison.pdf"),
+       plot = p_combined,
+       width = 6.5, height = 5)
+```
+
+```{r}
+# run all above
+```

@@ -1,0 +1,507 @@
+# ===== SCRIPT OVERVIEW =====
+# Task:   Visualise user-level emotion dynamics features and bootstrap regression results.
+#         Shows feature distributions, correlation matrix, PCA, and model coefficients.
+# Input:  data/Austria-Panel-Users-Features-Tweet.csv
+#         ./user_models_tweet_boot.rds  (output of 6-boot_features_models.R)
+# Output: ./users/features_hist.png
+#         ./users/corr_matrix.png
+#         ./users/outcome_bar.png
+#         ./users/user_sharing_proportions.png
+#         ./users/pca_scree_plot.png
+#         ./users/boot_results_plot.png
+#         output/features_hist.pdf
+#         output/pca_scree_plot.pdf
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE, message = FALSE,
+                      fig.width = 6.5, 
+                      fig.height = 4.5,
+                      dpi=300)
+```
+
+```{r packages}
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(corrplot)
+library(car)
+library(FactoMineR)
+library(factoextra)
+library(boot)
+library(pROC)
+library(kableExtra)
+````
+
+```{r paths}
+src <- "../../data"
+dst <- "../../output"
+file <- "Austria-Panel-Users-Features-Tweet.csv"
+dir.create("./users", showWarnings = FALSE, recursive = TRUE)
+
+features <- read_csv(file.path(src, file),
+                     col_types = cols(
+                       .default = col_double()
+                     )) 
+```
+
+
+```{r}
+custom_plot <- function() {
+  theme_classic() +  
+    theme(
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text.x  = element_text(size = 11),
+      axis.text.y  = element_text(size = 11),
+      legend.title = element_text(size = 12),
+      legend.text  = element_text(size = 11)
+    )
+}
+```
+
+# ===== DATA OVERVIEW =====
+```{r}
+cat("Total users:", nrow(features), "\n\n")
+
+cat("Feature summary:\n")
+print(summary(features))
+
+cat("\nMissing values:\n")
+print(colSums(is.na(features)))
+```
+
+
+# ===== DISTRIBUTION PLOTS =====
+```{r}
+corr_features <- features %>%
+  dplyr:::select(-author_id)
+
+dist_data <- corr_features %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "value")
+
+# remove avg_untrustworthy and avg_biased
+pred_data <- dist_data %>%
+  filter(feature != "n_news_shared" & feature != "n_untrustworthy_shared" & feature != "n_biased_shared")
+
+dist_plot <- ggplot(pred_data, aes(x = value)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.9) +
+  facet_wrap(~ feature, scales = "free", ncol = 4) +
+  labs(x = "value",
+       y = "frequency") +
+  custom_plot() +
+  theme(
+     axis.text.x  = element_text(size = 8),
+     axis.text.y = element_text(size = 8)
+        )
+
+print(dist_plot)
+```
+
+
+
+# ===== SUMMARY STATISTICS TABLE =====
+```{r}
+summary_stats <- corr_features %>%
+  summarise(across(everything(), 
+                   list(mean = ~mean(., na.rm = TRUE),
+                        sd = ~sd(., na.rm = TRUE),
+                        median = ~median(., na.rm = TRUE),
+                        min = ~min(., na.rm = TRUE),
+                        max = ~max(., na.rm = TRUE),
+                        n_missing = ~sum(is.na(.)))))
+
+print(summary_stats)
+```
+
+
+# ===== REGRESSION ANALYSIS =====
+```{r}
+features$shares_news <- as.integer(features$n_news_shared > 0)
+features$shares_untrustworthy <- as.integer(features$n_untrustworthy_shared > 0)
+features$shares_biased <- as.integer(features$n_biased_shared > 0)
+
+table(features$shares_news)
+table(features$shares_untrustworthy)
+table(features$shares_biased)
+```
+
+```{r}
+total_users <- nrow(features)
+
+shares_news_count <- sum(features$shares_news)
+shares_news_pct <- round(shares_news_count / total_users * 100, 1)
+
+shares_untrustworthy_count <- sum(features$shares_untrustworthy)
+shares_untrustworthy_pct <- round(shares_untrustworthy_count / total_users * 100, 1)
+
+shares_biased_count <- sum(features$shares_biased)
+shares_biased_pct <- round(shares_biased_count / total_users * 100, 1)
+
+user_table <- data.frame(
+  `News type` = c("Any news source", 
+                  "Untrustworthy sources (NewsGuard < 60)", 
+                  "Partisan sources (left/right bias)"),
+  `Users (n)` = c(shares_news_count, 
+                              shares_untrustworthy_count, 
+                              shares_biased_count),
+  `Users (\\%)` = c(shares_news_pct, 
+                              shares_untrustworthy_pct, 
+                              shares_biased_pct),
+  check.names = FALSE
+)
+
+print(user_table)
+```
+
+
+# ===== MULTICOLLINEARITY =====
+```{r}
+m_news <- glm(shares_news ~ anger_baseline + 
+                            fear_baseline +
+                            anger_variability +
+                            fear_variability +
+                            anger_instability +
+                            fear_instability +
+                            anger_inertia +
+                            fear_inertia,
+                  data = features,
+                  family = binomial(link = "logit"))
+
+vif(m_news)
+```
+
+```{r}
+emotion_vars <- c('anger_baseline', 'anger_variability', 
+                  'anger_instability', 'anger_inertia',
+                  'fear_baseline', 'fear_variability',
+                  'fear_instability', 'fear_inertia')
+
+pca_data <- features[complete.cases(features[, emotion_vars]), emotion_vars]
+
+pca_result <- prcomp(pca_data, 
+                     scale. = TRUE, 
+                     center = TRUE)
+
+summary(pca_result)
+```
+```{r}
+pca_scree <- fviz_eig(pca_result, addlabels = TRUE,
+ ylim = c(0, 61))+
+  custom_plot()+
+  theme(plot.title=element_blank())
+
+```
+```{r}
+print(pca_result$rotation)
+```
+
+```{r}
+variance_explained <- summary(pca_result)$importance
+print(variance_explained[, 1:4])
+```
+
+# ===== MODEL EVALUATION =====
+
+```{r}
+complete_features <- features[complete.cases(features[, 
+                        c('shares_untrustworthy',  # shouldnt have NaNs but just in case
+                          'shares_news',
+                          'shares_biased',
+                          'anger_baseline', 'fear_baseline', # could have NaN if not enough data points
+                          'anger_variability', 'fear_variability',
+                          'anger_instability', 'fear_instability',
+                          'anger_inertia', 'fear_inertia')]), ]
+
+z_features <- complete_features %>%
+  mutate(across(c(anger_baseline, fear_baseline, 
+                  anger_variability, fear_variability,
+                  anger_instability, fear_instability,
+                  anger_inertia, fear_inertia),
+                ~as.numeric(scale(.))))
+
+df <- z_features
+
+# whats the number of users? 
+nrow(df)
+```
+```{r}
+m_news_base <- glm(shares_news ~ anger_baseline + fear_baseline,
+               data = df, family = binomial)
+
+m_news_variability <- glm(shares_news ~ anger_variability + fear_variability,
+               data = df, family = binomial)
+
+m_news_instability <- glm(shares_news ~ anger_instability + fear_instability,
+               data = df, family = binomial)
+
+m_news_inertia <- glm(shares_news ~ anger_inertia + fear_inertia,
+               data = df, family = binomial)
+
+vif(m_news_base); vif(m_news_variability);vif(m_news_instability); vif(m_news_inertia)
+```
+```{r}
+m_misinfo_base <- glm(shares_untrustworthy ~ anger_baseline + fear_baseline,
+               data = df, family = binomial)
+
+m_misinfo_variability <- glm(shares_untrustworthy ~ anger_variability + fear_variability,
+               data = df, family = binomial)
+
+m_misinfo_instability <- glm(shares_untrustworthy ~ anger_instability + fear_instability,
+               data = df, family = binomial)
+
+m_misinfo_inertia <- glm(shares_untrustworthy ~ anger_inertia + fear_inertia,
+               data = df, family = binomial)
+
+vif(m_misinfo_base); vif(m_misinfo_variability);vif(m_misinfo_instability); vif(m_misinfo_inertia)
+```
+
+```{r}
+m_partisan_base <- glm(shares_biased ~ anger_baseline + fear_baseline,
+               data = df, family = binomial)
+
+m_partisan_variability <- glm(shares_biased ~ anger_variability + fear_variability,
+               data = df, family = binomial)
+
+m_partisan_instability <- glm(shares_biased ~ anger_instability + fear_instability,
+               data = df, family = binomial)
+
+m_partisan_inertia <- glm(shares_biased ~ anger_inertia + fear_inertia,
+               data = df, family = binomial)
+
+vif(m_partisan_base); vif(m_partisan_variability);vif(m_partisan_instability); vif(m_partisan_inertia)
+```
+
+
+
+# ===== ADD BOOTSTRAP UNCERTAINTY =====
+```{r}
+boot_objects <- readRDS("users/user_models_tweet_boot.rds")
+
+boot_news_base <- boot_objects$boot_news_base
+boot_news_var <- boot_objects$boot_news_var
+boot_news_inst <- boot_objects$boot_news_inst
+boot_news_inertia <- boot_objects$boot_news_inertia
+boot_misinfo_base <- boot_objects$boot_misinfo_base
+boot_misinfo_var <- boot_objects$boot_misinfo_var
+boot_misinfo_inst <- boot_objects$boot_misinfo_inst
+boot_misinfo_inertia <- boot_objects$boot_misinfo_inertia
+boot_partisan_base <- boot_objects$boot_partisan_base
+boot_partisan_var <- boot_objects$boot_partisan_var
+boot_partisan_inst <- boot_objects$boot_partisan_inst
+boot_partisan_inertia <- boot_objects$boot_partisan_inertia
+```
+
+```{r}
+get_boot_cis <- function(boot_obj, outcome_name, feature_name) {
+  param_names <- names(boot_obj$t0)
+  param_names <- param_names[param_names != "(Intercept)"] # skip intercept
+  indices <- which(names(boot_obj$t0) %in% param_names)
+  
+  ci_df <- data.frame(
+    outcome = outcome_name,
+    feature = feature_name,
+    parameter = param_names,
+    estimate = boot_obj$t0[indices],
+    lower = apply(boot_obj$t[, indices, drop=FALSE], 2, quantile, probs = 0.025),
+    upper = apply(boot_obj$t[, indices, drop=FALSE], 2, quantile, probs = 0.975)
+  )
+  
+  rownames(ci_df) <- NULL
+  return(ci_df)
+}
+
+
+boot_results <- bind_rows(
+  get_boot_cis(boot_news_base, "any news", "baseline"),
+  get_boot_cis(boot_news_var, "any news", "variability"),
+  get_boot_cis(boot_news_inst, "any news", "instability"),
+  get_boot_cis(boot_news_inertia, "any news", "inertia"),
+  
+  get_boot_cis(boot_misinfo_base, "untrustworthy news", "baseline"),
+  get_boot_cis(boot_misinfo_var, "untrustworthy news", "variability"),
+  get_boot_cis(boot_misinfo_inst, "untrustworthy news", "instability"),
+  get_boot_cis(boot_misinfo_inertia, "untrustworthy news", "inertia"),
+  
+  get_boot_cis(boot_partisan_base, "partisan news", "baseline"),
+  get_boot_cis(boot_partisan_var, "partisan news", "variability"),
+  get_boot_cis(boot_partisan_inst, "partisan news", "instability"),
+  get_boot_cis(boot_partisan_inertia, "partisan news", "inertia")
+)
+```
+
+
+# ===== RESULTS VISUALIZATION =====
+```{r}
+boot_results_plot <- boot_results %>%
+  mutate(
+    OR = exp(estimate),
+    OR_lower = exp(lower),
+    OR_upper = exp(upper),
+    emotion = case_when(
+      grepl("anger", parameter) ~ "anger",
+      grepl("fear", parameter) ~ "fear"
+    ),
+    feature = factor(feature, levels = c("baseline", "variability", "instability", "inertia")),
+    outcome = factor(outcome, levels = c("any news", "partisan news", "untrustworthy news"))
+  )
+
+print(boot_results_plot)
+```
+
+```{r}
+or_plot <- ggplot(boot_results_plot, aes(x = OR, y = feature, color = emotion)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(position = position_dodge(width = 0.5), size = 2) +
+  geom_errorbarh(aes(xmin = OR_lower, xmax = OR_upper),
+                 position = position_dodge(width = 0.5),
+                 height = 0,
+                 linewidth = 0.7) +
+  facet_wrap(~ outcome, ncol = 3) +
+  labs(x = "Odds Ratio (95% CI)",
+       y = "Emotional Feature",
+       color = "") +
+  scale_color_manual(values = c("anger" = "#e41a1c", "fear" = "#377eb8")) +
+  custom_plot() +
+  theme(
+    legend.position = "bottom",
+    legend.box.margin = margin(t = -10, r = 0, b = 0, l = 0),
+    axis.text = element_text(color="black"),
+    strip.background = element_rect(fill = "white", color = "black"),
+    strip.text = element_text(face = "bold", size = 11))
+
+print(or_plot)
+
+# Figure 2a
+ggsave(file.path(dst, "features_boot_results.pdf"),
+       or_plot,
+       width = 6.5, height = 4.5, dpi = 300)
+```
+
+
+## SAVE FOR PAPER
+```{r}
+ggsave(file.path(dst, "features_hist.pdf"), 
+          dist_plot, 
+          width = 6.5, height = 4,
+          dpi=300)
+```
+```{r}
+user_latex <- kable(user_table, 
+                    format = "latex", 
+                    booktabs = TRUE,
+                    align = c("l", "c", "c"),
+                    escape = FALSE)
+
+# Table S15: News behavior of users (sharing proportions)
+out <- file.path(dst, "user_table.tex")
+writeLines(as.character(user_latex), out)
+```
+
+```{r}
+# stargazer wont work on one of the models so we create our own function
+create_latex_table <- function(models, model_names, filename) {
+
+  # extract coefficients
+  coefs <- lapply(models, function(m) {
+    summ <- summary(m)$coefficients
+    data.frame(
+      est = summ[, "Estimate"],
+      se = summ[, "Std. Error"],
+      pval = summ[, "Pr(>|z|)"],
+      term = rownames(summ)
+    )
+  })
+
+  # add sig. stars
+  get_stars <- function(p) {
+    if (p < 0.001) return("***")
+    if (p < 0.01) return("**")
+    if (p < 0.05) return("*")
+    return("")
+  }
+
+  latex <- ""
+  latex <- paste0(latex, "\\begin{tabular}{l", paste(rep("c", length(models)), collapse=""), "}\n")
+  latex <- paste0(latex, "\\hline\n")
+
+  latex <- paste0(latex, " & ", paste(model_names, collapse = " & "), " \\\\\n")
+  latex <- paste0(latex, "\\hline\n")
+
+
+  for (term in c("anger", "fear")) {
+    latex <- paste0(latex, ifelse(term == "anger", "Anger", "Fear"))
+    for (i in 1:length(models)) {
+      coef_row <- coefs[[i]][grep(term, coefs[[i]]$term, ignore.case = TRUE), ]
+      if (nrow(coef_row) > 0) {
+        stars <- get_stars(coef_row$pval)
+        latex <- paste0(latex, " & ", sprintf("%.3f", coef_row$est), stars,
+                        " (", sprintf("%.3f", coef_row$se), ")")
+      } else {
+        latex <- paste0(latex, " & ")
+      }
+    }
+    latex <- paste0(latex, " \\\\\n")
+  }
+
+  latex <- paste0(latex, "Constant")
+  for (i in 1:length(models)) {
+    int_row <- coefs[[i]][coefs[[i]]$term == "(Intercept)", ]
+    stars <- get_stars(int_row$pval)
+    latex <- paste0(latex, " & ", sprintf("%.3f", int_row$est), stars,
+                    " (", sprintf("%.3f", int_row$se), ")")
+  }
+  latex <- paste0(latex, " \\\\\n")
+
+  latex <- paste0(latex, "\\hline\n")
+
+  latex <- paste0(latex, "Observations")
+  for (m in models) {
+    latex <- paste0(latex, " & ", format(nobs(m), big.mark=","))
+  }
+  latex <- paste0(latex, " \\\\\n")
+
+  latex <- paste0(latex, "AIC")
+  for (m in models) {
+    latex <- paste0(latex, " & ", sprintf("%.1f", AIC(m)))
+  }
+  latex <- paste0(latex, " \\\\\n")
+
+  latex <- paste0(latex, "\\hline\n")
+  latex <- paste0(latex, "\\multicolumn{", length(models)+1, "}{l}{\\footnotesize $^{***}$p$<$0.001; $^{**}$p$<$0.01; $^{*}$p$<$0.05} \\\\\n")
+  latex <- paste0(latex, "\\end{tabular}\n")
+
+  # Tables S16 (news), S17 (untrustworthy), S18 (partisan)
+  writeLines(latex, file.path(dst, filename))
+  cat("LaTeX table written to", filename, "\n")
+}
+
+
+create_latex_table(
+  list(m_news_base, m_news_variability, m_news_instability, m_news_inertia),
+  c("Baseline", "Variability", "Instability", "Inertia"),
+  "table_news_models.tex"
+)
+
+create_latex_table(
+  list(m_misinfo_base, m_misinfo_variability, m_misinfo_instability, m_misinfo_inertia),
+  c("Baseline", "Variability", "Instability", "Inertia"),
+  "table_misinfo_models.tex"
+)
+
+create_latex_table(
+  list(m_partisan_base, m_partisan_variability, m_partisan_instability, m_partisan_inertia),
+  c("Baseline", "Variability", "Instability", "Inertia"),
+  "table_partisan_models.tex"
+)
+```
+
+```{r}
+ggsave(file.path(dst,"pca_scree_plot.pdf"), 
+       pca_scree)
+```
+
+```{r}
+# run all
+print("Running all analysis steps...")
+```

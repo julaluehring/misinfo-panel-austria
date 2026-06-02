@@ -1,0 +1,691 @@
+# ===== SCRIPT OVERVIEW =====
+# Task:   Fit and diagnose a VAR (Vector Autoregression) model on the daily time series.
+#         Tests lag selection, residual autocorrelation, and Granger causality.
+# Input:  data/Austria-Panel-Daily.csv
+# Output: output/irf_plot.pdf
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.width = 6, 
+                      fig.height = 3,
+                      dpi=300)
+
+options(scipen=999)
+set.seed(636)
+```
+
+```{r load packages}
+library(readr)
+library(scales)
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+library(broom)
+library(kableExtra)
+library(forecast)
+library(tseries)
+#library(TRA)
+library(vars)
+library(lmtest)
+library(tsoutliers)
+library(tsDyn)  #VECM
+```
+
+```{r paths}
+src <- here::here("data")
+dst <- here::here("output")
+```
+
+```{r custom plots}
+custom_plot <- function() {
+  theme_classic() +  
+    theme(
+      axis.title.x = element_text(size = 14),
+      axis.title.y = element_text(size = 14),
+      axis.text.x  = element_text(size = 12),
+      axis.text.y  = element_text(size = 12),
+      legend.title = element_text(size = 13),
+      legend.text  = element_text(size = 11)
+    )
+}
+```
+
+```{r}
+src <- "../../data"
+dst <- "../../output"
+dir.create(dst, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+daily_summary$day <- as.Date(daily_summary$day, format = "%Y-%m-%d")
+summary(daily_summary)
+```
+
+```{r}
+daily_summary <- daily_summary %>% arrange(day)
+head(daily_summary, 5)
+```
+
+```{r}
+# create proportions
+daily_summary <- daily_summary %>%
+  mutate(
+    prop_news = (count_ng_domains / tweet_count)*100,
+    prop_trust = ((count_caution + count_max_caution) / count_ng_domains)*100,
+    prop_anger = (count_anger / tweet_count)*100,
+    prop_fear = (count_fear / tweet_count)*100
+  )
+
+head(daily_summary,2)
+```
+
+```{r}
+start_date <- min(daily_summary$day)
+start_year <- year(start_date)
+start_day  <- yday(start_date)  # day of year for start
+```
+
+```{r}
+ts_score <- ts(daily_summary$prop_trust, 
+               start = c(start_year, start_day), 
+               frequency = 7 
+               )
+
+
+ts_news <- ts(daily_summary$prop_news,
+                  start = c(start_year, start_day), 
+                  frequency = 7 
+                 )
+
+range(ts_score); range(ts_news)
+```
+
+```{r}
+ts_fear <- ts(daily_summary$prop_fear,
+                  start = c(start_year, start_day), 
+                  frequency = 7 
+                 )
+
+
+ts_anger <- ts(daily_summary$prop_anger,
+                  start = c(start_year, start_day), 
+                  frequency = 7 
+                 )
+
+
+range(ts_fear); range(ts_anger)
+```
+
+```{r}
+data_ts <- cbind(ts_news, ts_score, ts_fear, ts_anger)
+colnames(data_ts) <- c("news", "misinfo", "fear", "anger")
+plot(data_ts, main = "All time series")
+```
+
+## Relationships between variables: VAR & VECM
+
+```{r}
+# Table S8: Correlation matrix
+cor_matrix <- round(cor(data_ts), 3)
+print(cor_matrix)
+
+cor_latex <- kable(as.data.frame(cor_matrix),
+                   format = "latex",
+                   booktabs = TRUE,
+                   digits = 3)
+writeLines(as.character(cor_latex), file.path(dst, "correlation_table.tex"))
+```
+
+There might be some overlap between the variables so that we move on to multivariate modeling techniques, treating all variables to be endogeneous (as a complete system if you will). 
+For a strategy called Vector Autoregressive Modeling, the time series have to be stationary. Depending on the package, the data has to be transformed. When using the vars library, its function VAR allows you to include trend and seasonality components.
+
+### Stationarity tests
+
+```{r}
+unit_root_table <- data.frame(
+  Variable = character(),
+  ADF = character(),
+  PP = character(),
+  KPSS = character(),
+  stringsAsFactors = FALSE
+)
+
+variables <- list(
+  "News" = ts_news,
+  "Misinformation" = ts_score,
+  "Fear" = ts_fear,
+  "Anger" = ts_anger
+)
+
+# Run tests for each variable
+for(var_name in names(variables)) {
+  
+  cat("Testing:", var_name, "\n")
+  ts_var <- variables[[var_name]]
+  
+  # ADF test
+  adf_result <- adf.test(ts_var)
+  adf_stat <- round(adf_result$statistic, 2)
+  adf_p <- ifelse(adf_result$p.value < 0.001, "<0.001", 
+                  sprintf("%.3f", adf_result$p.value))
+  adf_str <- paste0(adf_stat, " (", adf_p, ")")
+  
+  # Phillips-Perron test
+  pp_result <- pp.test(ts_var)
+  pp_stat <- round(pp_result$statistic, 2)
+  pp_p <- ifelse(pp_result$p.value < 0.001, "<0.001", 
+                  sprintf("%.3f", pp_result$p.value))
+  pp_str <- paste0(pp_stat, " (", pp_p, ")")
+  
+  # KPSS test
+  kpss_result <- kpss.test(ts_var, null = "Level")
+  kpss_stat <- round(kpss_result$statistic, 2)
+  kpss_p <- ifelse(kpss_result$p.value > 0.10, ">0.10",
+                   ifelse(kpss_result$p.value < 0.001, "<0.001",
+                          sprintf("%.3f", kpss_result$p.value)))
+  kpss_str <- paste0(kpss_stat, " (", kpss_p, ")")
+  
+  unit_root_table <- rbind(unit_root_table, data.frame(
+    Variable = var_name,
+    ADF = adf_str,
+    PP = pp_str,
+    KPSS = kpss_str,
+    stringsAsFactors = FALSE
+  ))
+}
+
+unit_root_latex_table <- kable(unit_root_table, 
+      format = "latex",
+      booktabs = TRUE,
+      align = c("l", "c", "c", "c"),
+      col.names = c("Variable", "ADF", "PP", "KPSS"))
+
+# save table
+# Table S9: Unit root tests
+out <- file.path(dst, "unit_root_table.tex")
+writeLines(as.character(unit_root_latex_table), out)
+```
+
+All variables are non-stationary except for misinformation, which has two structural breaks. 
+We test for co-integration. 
+
+
+### Tests for co-integration
+
+```{r}
+n <- length(ts_score)
+step1 <- ifelse(seq_len(n) >= 1278, 1, 0)  
+step2 <- ifelse(seq_len(n) >= 1336, 1, 0)  
+data_I1 <- cbind(ts_score, ts_fear, ts_anger)  # I(1) variables only
+exog_vars <- cbind(ts_news, step1, step2)      # I(0) + break dummies
+
+VARselect(diff(data_I1), exogen = diff(exog_vars))
+```
+
+
+
+The [forecast tutorial](https://otexts.com/fpp2/VAR.html) says: "VARselect() for selecting the number of lags (p) using four different information criteria: AIC, HQ, SC and FPE. We have met the AIC before, and SC is simply another name for the BIC (SC stands for Schwarz Criterion, after Gideon Schwarz who proposed it). HQ is the Hannan-Quinn criterion, and FPE is the “Final Prediction Error” criterion.27 Care should be taken when using the AIC as it tends to choose large numbers of lags. Instead, for VAR models, we prefer to use the BIC."
+
+**--> Start with SC and use a simpler lag structure if in doubt as time series tend to explode with too many lags**
+
+```{r}
+summary(ca.jo(data_I1, type = "trace", ecdet = "trend",    
+                 K = 6, spec = "transitory",
+                 dumvar = cbind(step1, step2))  # structural break dummies
+)
+```
+
+From Lütkepohl (2005, Section 6.2): "If the data have no obvious deterministic trend, or if trends are captured by other means (e.g., dummy variables for structural breaks), the constant-only specification is preferable."
+
+```{r}
+jo_results <- ca.jo(data_I1, type = "trace", ecdet = "const",    
+                 K = 6, spec = "transitory",
+                 dumvar = cbind(step1, step2))  # structural break dummies
+        
+
+test_stats <- jo_results@teststat
+crit_values <- jo_results@cval
+r_values <- 0:(length(test_stats) - 1)
+
+jo_results_table <- data.frame(
+  r = paste0("r <= ", r_values),
+  Statistic = round(test_stats, 2),
+  "10%" = crit_values[, 1],
+  "5%" = crit_values[, 2],
+  "1%" = crit_values[, 3],
+  check.names = FALSE
+)
+
+jo_results_latex <- kable(jo_results_table, 
+      format = "latex",
+      booktabs = TRUE,
+      align = c("l", "r", "r", "r", "r"))
+
+# Table S10: Johansen cointegration test
+out <- file.path(dst, "jo_results_table.tex")
+writeLines(as.character(jo_results_latex), out)
+```
+
+Both specifications say r = 3 --> Use VAR in levels / this is called "full rank" co-integration.
+From Lütkepohl (2005): "If the number of cointegrating vectors equals the number of variables (r = K), the system is stationary and a standard VAR in levels is appropriate."
+
+### Finding the rightt VAR model in levels
+
+```{r}
+VARselect(data_I1, exogen = cbind(step1, step2, ts_news))
+```
+
+```{r}
+summary_df <- data.frame(
+  p = integer(),
+  stable = logical(),
+  max_root = numeric(),
+  serial_chisq = numeric(),
+  serial_p = numeric(),
+  arch_chisq = numeric(), 
+  arch_p = numeric(),
+  norm_stat = numeric(),
+  norm_p = character(),
+  aic = numeric(),
+  bic = numeric()
+)
+
+for(p in 7:9) {
+  var_model <- VAR(data_I1, 
+                   p = p, 
+                   type = "const",
+                   exogen = cbind(step1, step2, ts_news))
+  
+   # stability
+  roots_var <- roots(var_model)
+  is_stable <- all(roots_var < 1)
+  max_root <- max(roots_var)
+  
+  # serial correlation
+  serial_test <- serial.test(var_model, lags.pt = 16, type = "PT.asymptotic")
+  serial_chisq <- serial_test$serial$statistic
+  serial_p_value <- serial_test$serial$p.value
+  serial_p <- ifelse(serial_p_value < 0.001, "<0.001", sprintf("%.3f", serial_p_value))
+  
+  # arch test
+  arch_test <- arch.test(var_model, lags.multi = 12)
+  arch_chisq <- arch_test$arch.mul$statistic
+  arch_p_value <- arch_test$arch.mul$p.value
+  arch_p <- ifelse(arch_p_value < 0.001, "<0.001", sprintf("%.3f", arch_p_value))
+  
+  # normality
+  norm_test <- normality.test(var_model, multivariate.only = TRUE)
+  norm_stat <- norm_test$jb.mul$JB$statistic
+  norm_p_value <- norm_test$jb.mul$JB$p.value
+  norm_p <- ifelse(norm_p_value < 0.001, "<0.001", sprintf("%.3f", norm_p_value))
+  
+  # information criteria
+  aic_val <- AIC(var_model)
+  bic_val <- BIC(var_model)
+  
+  summary_df <- rbind(summary_df, data.frame(
+    p = p,
+    stable = is_stable,
+    max_root = max_root,
+    serial_chisq = serial_chisq,
+    serial_p = serial_p,
+    arch_chisq = arch_chisq, 
+    arch_p = arch_p,
+    norm_stat = norm_stat,
+    norm_p = norm_p,
+    aic = aic_val,
+    bic = bic_val
+  ))
+}
+
+formatted_diagnostics <- data.frame(
+  Lags = summary_df$p,
+  Stable = ifelse(summary_df$stable, "Yes", "No"),
+  Max_Root = sprintf("%.3f", summary_df$max_root),
+  Serial_Test = sprintf("%.2f (%s)", summary_df$serial_chisq, summary_df$serial_p),
+  ARCH_Test = sprintf("%.2f (%s)", summary_df$arch_chisq, summary_df$arch_p),
+  Normality = sprintf("%.2f (%s)", summary_df$norm_stat, summary_df$norm_p),
+  AIC = sprintf("%.2f", summary_df$aic),
+  BIC = sprintf("%.2f", summary_df$bic)
+)
+
+diagnostics_latex <- kable(formatted_diagnostics, 
+      format = "latex",
+      booktabs = TRUE,
+      col.names = c("Lags (p)", "Stable", "Max Root", 
+                    "Portmanteau test", 
+                    "ARCH test", "Normality", "AIC", "BIC"),
+      align = c("c", "c", "r", "r", "r", "r", "r"),
+      escape = FALSE)
+
+# Table S11: VAR diagnostics
+out <- file.path(dst, "diagnostics_table.tex")
+writeLines(as.character(diagnostics_latex), out)
+
+formatted_diagnostics
+```
+
+
+```{r}
+final_var_model <- VAR(data_I1, 
+                   p = 9, 
+                   type = "const",
+                   exogen = cbind(step1, step2, ts_news))
+
+var_summary <- data.frame(
+  Equation = character(),
+  R_squared = numeric(),
+  Adj_R_squared = numeric(),
+  Residual_SE = numeric(),
+  F_statistic = numeric(),
+  F_p_value = numeric()
+)
+
+summary_obj <- summary(final_var_model)
+
+for(i in 1:3) {
+  eq_name <- names(summary_obj$varresult)[i]
+  eq_summary <- summary_obj$varresult[[i]]
+  
+  var_summary <- rbind(var_summary, data.frame(
+    Equation = eq_name,
+    R_squared = eq_summary$r.squared,
+    Adj_R_squared = eq_summary$adj.r.squared,
+    Residual_SE = eq_summary$sigma,
+    F_statistic = eq_summary$fstatistic[1],
+    F_p_value = pf(eq_summary$fstatistic[1], 
+                   eq_summary$fstatistic[2], 
+                   eq_summary$fstatistic[3], 
+                   lower.tail = FALSE)
+  ))
+}
+
+
+var_summary$Equation <- c("Misinformation", "Fear", "Anger")
+
+var_latex <- kable(var_summary,
+      format = "latex",
+      booktabs = TRUE,
+      digits = 3,
+      row.names=FALSE,
+      col.names = c("Equation", "$R^2$", "Adj. $R^2$", 
+                    "Residual SE", "F-statistic", "p-value"),
+      escape = FALSE)
+
+# Table S12: VAR model summary
+out <- file.path(dst, "var_summary_table.tex")
+writeLines(as.character(var_latex), out)
+
+var_summary
+```
+
+
+
+
+## Granger causality test
+
+```{r}
+gc_misinfo <- causality(final_var_model, cause = "ts_score")
+gc_fear <- causality(final_var_model, cause = "ts_fear")
+gc_anger <- causality(final_var_model, cause = "ts_anger")
+
+granger_table <- data.frame(
+  Cause = c("Misinformation", "Fear", "Anger"),
+  F_statistic = c(
+    gc_misinfo$Granger$statistic,
+    gc_fear$Granger$statistic,
+    gc_anger$Granger$statistic
+  ),
+  df1 = c(
+    gc_misinfo$Granger$parameter[1],
+    gc_fear$Granger$parameter[1],
+    gc_anger$Granger$parameter[1]
+  ),
+  df2 = c(
+    gc_misinfo$Granger$parameter[2],
+    gc_fear$Granger$parameter[2],
+    gc_anger$Granger$parameter[2]
+  ),
+  p_value = c(
+    gc_misinfo$Granger$p.value,
+    gc_fear$Granger$p.value,
+    gc_anger$Granger$p.value
+  )
+)
+
+granger_formatted <- data.frame(
+  Hypothesis = c(
+    "Misinformation $\\rightarrow$ Fear, Anger",
+    "Fear $\\rightarrow$ Misinformation, Anger",
+    "Anger $\\rightarrow$ Misinformation, Fear"
+  ),
+  F_stat = sprintf("%.2f", granger_table$F_statistic),
+  df = sprintf("(%d, %d)", granger_table$df1, granger_table$df2),
+  p_value = ifelse(granger_table$p_value < 0.001, "$<$0.001",
+                   sprintf("%.3f", granger_table$p_value)),
+  stringsAsFactors = FALSE
+)
+
+granger_latex <- kable(granger_formatted,
+      format = "latex",
+      booktabs = TRUE,
+      row.names = FALSE,
+      align = c("l", "r", "c", "r", "l"),
+      col.names = c("Null Hypothesis ($H_0$: No Granger Causality)", 
+                    "F", "df", "p-value"),
+      escape = FALSE) 
+
+# Table S13: Granger causality tests
+out <- file.path(dst, "granger_table.tex")
+writeLines(as.character(granger_latex), out)
+
+print(granger_table)
+```
+
+All variables are interconnected and every predictor is significant but anger is the strongest in Granger-causing others. 
+
+Misinformation has lagged effects only.
+Fear and Anger move together (same-day effects), while misinformation operates with a lag (no same-day effect).
+
+## Impulse response function 
+--> bootstrapping might take a while. 
+
+```{r}
+# Does misinfo affect fear and anger?
+irf_misinfo <- irf(final_var_model, 
+                   impulse = "ts_score", 
+                   n.ahead = 14,
+                   ortho = FALSE,
+                   boot = TRUE, 
+                   runs = 10000)
+plot(irf_misinfo)
+```
+
+```{r}
+# Does fear affect anger?
+irf_fear <- irf(final_var_model, impulse = "ts_fear", 
+                n.ahead = 14, boot = TRUE, 
+                ortho=FALSE,
+                runs = 10000)
+plot(irf_fear)
+```
+
+```{r}
+# Does anger feed back to misinfo?
+irf_anger <- irf(final_var_model, 
+                 impulse = "ts_anger", 
+                 n.ahead = 14, boot = TRUE, 
+                 ortho=FALSE,
+                 runs = 10000)
+plot(irf_anger)
+```
+
+```{r}
+extract_irf_data <- function(irf_object, shock_name, response_var, shock_label, scale_factor) {
+  data.frame(
+    days = 0:(nrow(irf_object$irf[[shock_name]]) - 1),
+    response = irf_object$irf[[shock_name]][, response_var] * scale_factor,
+    lower = irf_object$Lower[[shock_name]][, response_var] * scale_factor,
+    upper = irf_object$Upper[[shock_name]][, response_var] * scale_factor,
+    shock = shock_label,
+    response_var = response_var
+  )
+}
+
+
+anger_data <- extract_irf_data(irf_anger, "ts_anger", "ts_score", "shock of anger", 10)
+fear_data <- extract_irf_data(irf_fear, "ts_fear", "ts_score", "shock of fear", 10)
+score_data <- extract_irf_data(irf_misinfo, "ts_score", "ts_score", "shock of misinfo", 10)
+score_response <- bind_rows(anger_data, fear_data, score_data)
+
+anger_data <- extract_irf_data(irf_anger, "ts_anger", "ts_anger", "shock of anger", 10)
+fear_data <- extract_irf_data(irf_fear, "ts_fear", "ts_anger", "shock of fear", 10)
+score_data <- extract_irf_data(irf_misinfo, "ts_score", "ts_anger", "shock of misinfo", 10)
+anger_response <- bind_rows(anger_data, fear_data, score_data)
+
+anger_data <- extract_irf_data(irf_anger, "ts_anger", "ts_fear", "shock of anger", 10)
+fear_data <- extract_irf_data(irf_fear, "ts_fear", "ts_fear", "shock of fear", 10)
+score_data <- extract_irf_data(irf_misinfo, "ts_score", "ts_fear", "shock of misinfo", 10)
+fear_response <- bind_rows(anger_data, fear_data, score_data)
+```
+
+
+```{r}
+score_irf <- ggplot(score_response, 
+                    aes(x = days, y = response)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "gray70", alpha = 0.3) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ shock, ncol = 3, scales = "free_y") + 
+  labs(x = NULL, 
+       y = "misinfo (%)") +
+  theme_classic() +
+  theme(
+    strip.background = element_rect(color = "black", fill = "gray95"),
+    strip.text = element_text(size = 10, hjust = 0.5),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_text(size = 10, margin = margin(r = 5)),
+    axis.text = element_text(size = 10),
+    plot.margin = margin(5, 5, 0, 5)
+  )
+
+anger_irf <- ggplot(anger_response, aes(x = days, y = response)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "gray70", alpha = 0.3) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ shock, ncol = 3, scales = "free_y") +
+  labs(x = NULL,
+       y = "anger (%)") +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(),  
+    strip.text = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_text(size = 10, margin = margin(r = 5)),
+    axis.text = element_text(size = 10),
+    plot.margin = margin(0, 5, 0, 5)
+  )
+
+fear_irf <- ggplot(fear_response, aes(x = days, y = response)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "gray70", alpha = 0.3) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ shock, ncol = 3, scales = "free_y") +
+  labs(x = "days after 10% shock", 
+       y = "response in fear (%)") +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.title = element_text(size = 10),
+    axis.title.y = element_text(margin = margin(r = 5)),
+    axis.text = element_text(size = 10),
+    plot.margin = margin(0, 5, 5, 5)
+  )
+
+
+irf_plot <- score_irf / anger_irf / fear_irf
+
+ggsave(file.path(dst, "irf_plot.pdf"),
+       plot = irf_plot,
+       width = 6.5, height = 6.5)
+```
+
+### Cumulative IRF -> in 3b-boot_irf.R
+
+
+### Variance Decomposition
+```{r}
+fevd_results <- fevd(final_var_model, n.ahead = 20)
+
+# Create table manually
+fevd_data <- data.frame(
+  Variable = rep(c("Misinformation", "Fear", "Anger"), each = 5),
+  Horizon = c(1, 3, 5, 7, 14),
+  Own = c(
+    # Misinformation at horizons 1, 5, 10, 20
+    fevd_results$ts_score[c(1, 3, 5, 7, 14), "ts_score"] * 100,
+    # Fear at horizons 1, 5, 10, 20
+    fevd_results$ts_fear[c(1, 3, 5, 7, 14), "ts_fear"] * 100,
+    # Anger at horizons 1, 5, 10, 20
+    fevd_results$ts_anger[c(1, 3, 5, 7, 14), "ts_anger"] * 100
+  ),
+  Misinformation = c(
+    # For Misinformation rows: NA (own variable)
+    rep(NA, 5),
+    # For Fear rows: contribution from misinformation
+    fevd_results$ts_fear[c(1, 3, 5, 7, 14), "ts_score"] * 100,
+    # For Anger rows: contribution from misinformation
+    fevd_results$ts_anger[c(1, 3, 5, 7, 14), "ts_score"] * 100
+  ),
+  Fear = c(
+    # For Misinformation rows: contribution from fear
+    fevd_results$ts_score[c(1, 3, 5, 7, 14), "ts_fear"] * 100,
+    # For Fear rows: NA (own variable)
+    rep(NA, 5),
+    # For Anger rows: contribution from fear
+    fevd_results$ts_anger[c(1, 3, 5, 7, 14), "ts_fear"] * 100
+  ),
+  Anger = c(
+    # For Misinformation rows: contribution from anger
+    fevd_results$ts_score[c(1, 3, 5, 7, 14), "ts_anger"] * 100,
+    # For Fear rows: contribution from anger
+    fevd_results$ts_fear[c(1, 3, 5, 7, 14), "ts_anger"] * 100,
+    # For Anger rows: NA (own variable)
+    rep(NA, 5)
+  )
+)
+
+# Format
+fevd_data$Own <- sprintf("%.1f", fevd_data$Own)
+fevd_data$Misinformation <- ifelse(is.na(fevd_data$Misinformation), 
+                                   "—", 
+                                   sprintf("%.1f", fevd_data$Misinformation))
+fevd_data$Fear <- ifelse(is.na(fevd_data$Fear), 
+                         "—", 
+                         sprintf("%.1f", fevd_data$Fear))
+fevd_data$Anger <- ifelse(is.na(fevd_data$Anger), 
+                          "—", 
+                          sprintf("%.1f", fevd_data$Anger))
+
+
+fevd_latex <- kable(fevd_data,
+      format = "latex",
+      booktabs = TRUE,
+      row.names = FALSE,
+      align = c("l", "c", "c", "c", "c"),
+      col.names = c("Variable", "Horizon", "Own",
+                    "Misinformation", "Fear", "Anger"),
+      escape = FALSE)
+
+# Table S14: Variance decomposition (FEVD)
+out <- file.path(dst, "fevd_table.tex")
+writeLines(as.character(fevd_latex), out)
+```
+
+## Run all of the above
+
+```{r}
+# run all the above code
+```
