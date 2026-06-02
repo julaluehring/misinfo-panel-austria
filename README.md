@@ -1,18 +1,20 @@
 # Emotions and Misinformation in the Austrian Twitter Panel
 
-Public repository for the data collection and analysis code to reproduce the statistical analysis. After downloading this repository, place the `data/` folder into the main directory (i.e., on the same level as the `scripts/` folder). We provide an `environment.yml` to re-create the conda environment (`conda env create -f environment.yml`) and a `requirements.txt` for pip-based installation.
+Public repository for the data collection and analysis code to reproduce the statistical analysis. After downloading und unzipping [this](https://doi.org/10.17605/OSF.IO/3QHCV) data repository, place the `data/` folder into the main directory (i.e., on the same level as the `scripts/` folder). We provide an `environment.yml` to re-create the conda environment (`conda env create -f environment.yml`) and a `requirements.txt` for pip-based installation.
 
 ## How to reproduce
 
 To reproduce the **main time-series results** (Figures 1, S2–S6, S11; Tables S2–S14), download and unzip emomis-austria-data.tar.gz, and place data/ at the same level as scripts/ (see repository tree below). Then, run scripts `2-describe_time_series.Rmd`, `3a-test_var.Rmd`, and `3b-boot_irf.R` from `scripts/analysis/`. 
 
-To reproduce the **user-level results** (Figures 2, S10, S12–S17; Tables S15–S22), place the anonymized files from `release/` in `data/` and run scripts `5-boot_features_models.R` through `13-analyze_cohorts.Rmd` in order. 
+To reproduce the **user-level results** (Figures 2, S10, S12–S17; Tables S15–S22), place the anonymized files from `data/` and run scripts `5-boot_features_models.R` through `13-analyze_cohorts.Rmd` in order. 
 
 All figures and tables are written to `output/`. Scripts are designed to be run from `scripts/analysis/` as the working directory, or knitted directly from an RStudio project at the repository root.
 
 ## Dataset
 
 The Austrian Twitter Panel covers **206 million tweets** posted between 2019-01-01 and 2023-04-01, collected via the Brandwatch API. The panel follows a fixed sample of Austrian Twitter users across the full observation period. The analysis sample is defined by `authors_filtered.csv` (activity and follower filter applied in `6-filter_authors.py`).
+
+Anonymized data files are published on [OSF](https://doi.org/10.17605/OSF.IO/3QHCV).
 
 ## Repository structure
 
@@ -65,7 +67,7 @@ Raw data arrives as gzipped Brandwatch JSON exports. The preparation pipeline ex
 - `5-concat_user_data.py`: concatenate all per-file user CSVs, deduplicate by `author_id` --> `Austria-Panel-Users.csv.gz`
 - `6-filter_authors.py`: apply activity filter (< 20 tweets/day) and follower filter (50–100,000) --> `authors_filtered.csv` (29,291 users)
 - `7-remove_user_columns.py`: strip PII columns (`username`, `name`, `location`, etc.) from `Austria-Panel-Tweets.csv.gz` 
-- `8-anonymize_ids.py`: replace real `author_id` and tweet `event_id` values with randomized sequential integers across all releasable files (`authors_filtered.csv`, `Austria-Panel-Users-Features-Tweet.csv`, `Austria-Panel-Users-Daily.csv.gz`, `Austria-Panel-User-Statistics.csv`, `Austria-Panel-Supersharers.csv`, `Austria-Panel-Tweets-Windows-1h-10min.csv.gz`, `Austria-Panel-Tweets-Windows-24h-10min.csv.gz`); output is gzip-compressed --> `release/` (mapping is not saved and cannot be reversed).
+- `8-anonymize_ids.py`: replace real `author_id` and tweet `event_id` values with randomized sequential integers across all releasable files (`authors_filtered.csv`, `Austria-Panel-Users-Features-Tweet.csv`, `Austria-Panel-Users-Daily.csv.gz`, `Austria-Panel-User-Statistics.csv`, `Austria-Panel-Supersharers.csv`, `Austria-Panel-Tweets-Windows-1h-10min.csv.gz`, `Austria-Panel-Tweets-Windows-24h-10min.csv.gz`); output is gzip-compressed --> `data/` (mapping is not saved and cannot be reversed).
 
 ## Inference
 
@@ -128,7 +130,7 @@ All Rmd scripts write figures and tables to `output/`.
 
 **Fully reproducible from `Austria-Panel-Daily.csv`** (no raw text, no user IDs, no direct NewsGuard scores): `2-describe_time_series.Rmd`, `3a-test_var.Rmd`, `3b-boot_irf.R`.
 
-**Reproducible from anonymized user features** (requires files from `release/`): `4-extract_features.py`, `5-boot_features_models.R`, `6-analyze_features.Rmd`, `7-aggregate_windows.py`, `8-boot_window_models.R`, `9-analyze_windows.Rmd`, `10-aggregate_user_stats.py`, `11-analyze_supersharers.Rmd`, `13-analyze_cohorts.Rmd`.
+**Reproducible from anonymized user features** (requires files from `data/`): `4-extract_features.py`, `5-boot_features_models.R`, `6-analyze_features.Rmd`, `7-aggregate_windows.py`, `8-boot_window_models.R`, `9-analyze_windows.Rmd`, `10-aggregate_user_stats.py`, `11-analyze_supersharers.Rmd`, `13-analyze_cohorts.Rmd`.
 
 **Not reproducible without restricted data:** the inference pipeline requires raw tweet text and the full NewsGuard database; network analyses (`12a-pull_replies.py`, `12d-analyze_replies.Rmd`) require the reply structure with user IDs, which cannot be released due to Twitter's Terms of Service.
 
