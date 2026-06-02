@@ -1,6 +1,6 @@
 # Emotions and Misinformation in the Austrian Twitter Panel
 
-Public repository for the data collection and analysis code to reproduce the statistical analysis. After downloading und unzipping [this](https://doi.org/10.17605/OSF.IO/3QHCV) data repository, place the `data/` folder into the main directory (i.e., on the same level as the `scripts/` folder). We provide an `environment.yml` to re-create the conda environment (`conda env create -f environment.yml`) and a `requirements.txt` for pip-based installation.
+Public repository for the data collection and analysis code to reproduce the statistical analysis. After downloading and unzipping the data from [OSF](https://osf.io/3qhcv/overview?view_only=fdd5ac1d11e74af0b8ee618f862d5ddd), place the `data/` folder into the main directory (i.e., on the same level as the `scripts/` folder). We provide an `environment.yml` to re-create the conda environment (`conda env create -f environment.yml`) and a `requirements.txt` for pip-based installation.
 
 ## How to reproduce
 
@@ -14,7 +14,6 @@ All figures and tables are written to `output/`. Scripts are designed to be run 
 
 The Austrian Twitter Panel covers **206 million tweets** posted between 2019-01-01 and 2023-04-01, collected via the Brandwatch API. The panel follows a fixed sample of Austrian Twitter users across the full observation period. The analysis sample is defined by `authors_filtered.csv` (activity and follower filter applied in `6-filter_authors.py`).
 
-Anonymized data files are published on [OSF](https://doi.org/10.17605/OSF.IO/3QHCV).
 
 ## Repository structure
 
