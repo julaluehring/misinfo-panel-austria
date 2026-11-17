@@ -1,9 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Concatenate all tweet CSVs into a single compressed master file.
-# Input:  <DATA_DIR>/CSVtweets/*.csv
-#         <DATA_DIR>/dtypes.pkl
-# Output: <DATA_DIR>/Austria-Panel-Tweets.csv.gz
-# Usage:  python 2-concat_tweet_data.py <DATA_DIR>
+# Task:   Concatenate the per-file tweet CSVs into one file.
+# Input:  data/CSVtweets/* (not released)
+#         data/dtypes.pkl
+# Output: data/Austria-Panel-Tweets.csv.gz (not released)
+# Run:    python 3-concat_tweet_data.py ../../data
 
 import os
 from os.path import join, isfile
@@ -12,7 +11,7 @@ from tqdm import tqdm
 import sys
 import pickle as pl
 
-src = sys.argv[1] # /misinfo-panel-austria/data
+src = sys.argv[1] # <DATA_DIR>
 input_dir = join(src, "CSVtweets")
 output_file = join(src, "Austria-Panel-Tweets.csv.gz")
 

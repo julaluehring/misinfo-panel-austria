@@ -1,13 +1,13 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Generate dtypes.pkl: a column-type dictionary required by all downstream concat and merge scripts for consistent dtypes.
-# Output: <DATA_DIR>/dtypes.pkl
-# Usage:  python 2-create_dtypes.py <DATA_DIR>
+# Task:   Write the column types used by the concatenation scripts.
+# Input:  none
+# Output: data/dtypes.pkl
+# Run:    python 2-create_dtypes.py ../../data
 
 import pickle as pl
 import sys
 from os.path import join
 
-src = sys.argv[1] # /misinfo-panel-austria/data
+src = sys.argv[1] # <DATA_DIR>
 
 dtypes = {
     "id":str, 

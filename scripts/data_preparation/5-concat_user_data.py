@@ -1,9 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Concatenate all per-file user CSVs into a single compressed file. Deduplicates by author_id (keeps last occurrence).
-# Input:  UserCSVfiles/*.csv
-#         dtypes.pkl  
-# Output: Austria-Panel-Users.csv.gz
-# Usage:  python 5-concat_user_data.py <DATA_DIR>
+# Task:   Concatenate the per-file user CSVs and keep one row per author_id.
+# Input:  data/UserCSVfiles/* (not released)
+#         data/dtypes.pkl
+# Output: data/Austria-Panel-Users.csv.gz (not released)
+# Run:    python 5-concat_user_data.py ../../data
 
 import os
 from os.path import join, isfile
@@ -12,7 +11,7 @@ from tqdm import tqdm
 import sys
 import pickle as pl
 
-src = sys.argv[1] # /misinfo-panel-austria/data
+src = sys.argv[1] # <DATA_DIR>
 input_dir = join(src, "UserCSVfiles")
 output_file = join(src, "Austria-Panel-Users.csv.gz")
 

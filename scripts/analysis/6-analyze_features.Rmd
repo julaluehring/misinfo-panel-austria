@@ -1,26 +1,24 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Visualise user-level emotion dynamics features and bootstrap regression results.
-#         Shows feature distributions, correlation matrix, PCA, and model coefficients.
-# Input:  data/Austria-Panel-Users-Features-Tweet.csv
-#         ./user_models_tweet_boot.rds  (output of 6-boot_features_models.R)
-# Output: ./users/features_hist.png
-#         ./users/corr_matrix.png
-#         ./users/outcome_bar.png
-#         ./users/user_sharing_proportions.png
-#         ./users/pca_scree_plot.png
-#         ./users/boot_results_plot.png
-#         output/features_hist.pdf
-#         output/pca_scree_plot.pdf
+---
+title: "6 - Analyze features"
+params:
+  lang: "de_en"      # de_en (main), de (SI)
+  controls: "none"   # none (main), activity (SI: + log number of classified tweets)
+  disgust: false     # false (main), true (robustness check for the response letter)
+---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE,
-                      warning = FALSE, message = FALSE,
-                      fig.width = 6.5, 
-                      fig.height = 4.5,
-                      dpi=300)
-```
+<!--
+Task:   Feature distributions, PCA and the results of the bootstrapped regressions.
+Input:  data/Austria-Panel-Users-Features-Tweet-<lang>.csv
+        output/users/user_models_tweet_boot_<lang>*.rds (from 5-boot_features_models.R)
+Output: output/tables/user_table.tex, table_{news,misinfo,partisan}_models.tex
+        output/figures/features_hist.pdf, pca_scree_plot.pdf
+        output/users/*.png
+Run:    As R Markdown or in terminal as Rscript -e 'rmarkdown::render("6-analyze_features.Rmd")'   # variants: params = list(lang = "de", controls = "activity", disgust = TRUE)
+-->
 
-```{r packages}
+```{r}
+rm(list = setdiff(ls(), "params"))   # keep the render parameters
+
 library(tidyverse)
 library(ggplot2)
 library(gridExtra)
@@ -31,18 +29,30 @@ library(factoextra)
 library(boot)
 library(pROC)
 library(kableExtra)
-````
 
-```{r paths}
+# variant via render(params = list(...)), see the YAML header; defaults = main specification
+LANG     <- params$lang       # de_en (main), de (SI)
+CONTROLS <- params$controls   # none (main), activity (SI: + log number of classified tweets)
+DISGUST  <- params$disgust    # FALSE (main), TRUE (robustness: + disgust; validation failed)
+EMOTIONS <- c("anger", "fear", if (DISGUST) "disgust")
+FEATURES <- c("baseline", "variability", "instability", "inertia")
+tag <- paste0(if (LANG == "de_en") "" else paste0("_", LANG),
+              if (CONTROLS == "activity") "_activity" else "",
+              if (DISGUST) "_disgust" else "")
+
 src <- "../../data"
 dst <- "../../output"
-file <- "Austria-Panel-Users-Features-Tweet.csv"
-dir.create("./users", showWarnings = FALSE, recursive = TRUE)
-
+users_dir <- file.path(dst, "users")
+for (d in c(users_dir, file.path(dst, "figures"), file.path(dst, "tables"))) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+file <- paste0("Austria-Panel-Users-Features-Tweet-", LANG, ".csv")
 features <- read_csv(file.path(src, file),
                      col_types = cols(
+                       author_id = col_character(),
                        .default = col_double()
-                     )) 
+                     ))
+emotion_vars <- as.vector(outer(EMOTIONS, FEATURES, paste, sep = "_"))
 ```
 
 
@@ -82,11 +92,17 @@ dist_data <- corr_features %>%
 
 # remove avg_untrustworthy and avg_biased
 pred_data <- dist_data %>%
-  filter(feature != "n_news_shared" & feature != "n_untrustworthy_shared" & feature != "n_biased_shared")
+  filter(feature != "n_news_shared" & feature != "n_untrustworthy_shared" & feature != "n_biased_shared") %>%
+  # only the emotions analyzed (no disgust in the main specification)
+  filter(!grepl("^(anger|fear|disgust)_", feature) |
+         grepl(paste0("^(", paste(EMOTIONS, collapse = "|"), ")_"), feature))
 
 dist_plot <- ggplot(pred_data, aes(x = value)) +
   geom_histogram(bins = 50, fill = "steelblue", alpha = 0.9) +
   facet_wrap(~ feature, scales = "free", ncol = 4) +
+  scale_x_continuous(n.breaks = 3,  # fewer breaks so that the labels do not overlap
+                     labels = scales::label_number(drop0trailing = TRUE, scale_cut = scales::cut_short_scale())) +
+  scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
   labs(x = "value",
        y = "frequency") +
   custom_plot() +
@@ -95,9 +111,32 @@ dist_plot <- ggplot(pred_data, aes(x = value)) +
      axis.text.y = element_text(size = 8)
         )
 
+ggsave(paste0(users_dir, "/features_hist", tag, ".png"), 
+          dist_plot, 
+          width = 6.5, height = 4)
 print(dist_plot)
 ```
 
+
+
+# ===== CORRELATION MATRIX =====
+```{r}
+corr_features <- features %>%
+  dplyr:::select(-author_id)
+
+corr_matrix <- cor(corr_features, method="spearman", 
+                    use = "pairwise.complete.obs")
+
+png(paste0(users_dir, "/corr_matrix", tag, ".png"), width = 8, height = 8, units = "in", res = 300)
+
+corrplot(corr_matrix, method = "color", type = "full", 
+         addCoef.col = "black", number.cex = 0.7,
+         tl.col = "black", tl.srt = 45,
+         col = colorRampPalette(c("#3B9AB2", "white", "#F21A00"))(200),
+         mar = c(0,0,2,0))
+
+dev.off()
+```
 
 
 # ===== SUMMARY STATISTICS TABLE =====
@@ -127,6 +166,29 @@ table(features$shares_biased)
 ```
 
 ```{r}
+outcome_plot <- features %>%
+  select(shares_news, shares_untrustworthy, shares_biased) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "value")%>%
+  mutate(value = as.factor(value))%>%
+  ggplot(aes(x = value)) +
+  geom_bar(fill = "steelblue", alpha = 0.9) +
+  facet_wrap(~ feature,
+  scales = "fixed", ncol = 3) +
+  labs(x = "value",
+       y = "frequency") +
+  custom_plot() +
+  theme(
+    axis.text.x  = element_text(size = 8),
+    axis.text.y = element_text(size = 8)
+  )
+
+ggsave(file.path(users_dir, "outcome_bar.png"), 
+          outcome_plot, 
+          width = 6.5, height = 3)
+print(outcome_plot)
+```
+
+```{r}
 total_users <- nrow(features)
 
 shares_news_count <- sum(features$shares_news)
@@ -140,7 +202,7 @@ shares_biased_pct <- round(shares_biased_count / total_users * 100, 1)
 
 user_table <- data.frame(
   `News type` = c("Any news source", 
-                  "Untrustworthy sources (NewsGuard < 60)", 
+                  "Untrustworthy sources (NewsGuard $< 60$)", 
                   "Partisan sources (left/right bias)"),
   `Users (n)` = c(shares_news_count, 
                               shares_untrustworthy_count, 
@@ -155,16 +217,39 @@ print(user_table)
 ```
 
 
+```{r}
+prop_data <- features %>%
+  summarise(
+    News_Share = sum(shares_news),
+    News_NoShare = sum(shares_news == 0),
+    Untrustworthy_Share = sum(shares_untrustworthy),
+    Untrustworthy_NoShare = sum(shares_untrustworthy == 0),
+    Biased_Share = sum(shares_biased),
+    Biased_NoShare = sum(shares_biased == 0)
+  ) %>%
+  pivot_longer(everything()) %>%
+  separate(name, into = c("category", "status"), sep = "_") %>%
+  group_by(category) %>%
+  mutate(percentage = value / sum(value) * 100)
+
+p_users <- ggplot(prop_data, aes(x = category, y = percentage, fill = status)) +
+  geom_bar(stat = "identity") +
+  labs(x = "news type",
+       y = "percentage",
+       fill = "") +
+  custom_plot() +
+  scale_fill_manual(values = c("NoShare" = "coral", "Share" = "steelblue")) +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), 
+            position = position_stack(vjust = 0.5))
+
+ggsave(file.path(users_dir, "user_sharing_proportions.png"), 
+       plot = p_users, 
+       width = 6.5, height = 4)
+```
+
 # ===== MULTICOLLINEARITY =====
 ```{r}
-m_news <- glm(shares_news ~ anger_baseline + 
-                            fear_baseline +
-                            anger_variability +
-                            fear_variability +
-                            anger_instability +
-                            fear_instability +
-                            anger_inertia +
-                            fear_inertia,
+m_news <- glm(reformulate(emotion_vars, "shares_news"),
                   data = features,
                   family = binomial(link = "logit"))
 
@@ -172,11 +257,6 @@ vif(m_news)
 ```
 
 ```{r}
-emotion_vars <- c('anger_baseline', 'anger_variability', 
-                  'anger_instability', 'anger_inertia',
-                  'fear_baseline', 'fear_variability',
-                  'fear_instability', 'fear_inertia')
-
 pca_data <- features[complete.cases(features[, emotion_vars]), emotion_vars]
 
 pca_result <- prcomp(pca_data, 
@@ -191,6 +271,11 @@ pca_scree <- fviz_eig(pca_result, addlabels = TRUE,
   custom_plot()+
   theme(plot.title=element_blank())
 
+ggsave(paste0(users_dir, "/pca_scree_plot", tag, ".png"), 
+       pca_scree, 
+       width = 6.5, 
+       height = 4.5, 
+       dpi = 300)
 ```
 ```{r}
 print(pca_result$rotation)
@@ -204,79 +289,39 @@ print(variance_explained[, 1:4])
 # ===== MODEL EVALUATION =====
 
 ```{r}
-complete_features <- features[complete.cases(features[, 
-                        c('shares_untrustworthy',  # shouldnt have NaNs but just in case
-                          'shares_news',
-                          'shares_biased',
-                          'anger_baseline', 'fear_baseline', # could have NaN if not enough data points
-                          'anger_variability', 'fear_variability',
-                          'anger_instability', 'fear_instability',
-                          'anger_inertia', 'fear_inertia')]), ]
+features$log_n_scored <- log(features$n_scored)
+complete_features <- features[complete.cases(features[,
+                        c('shares_untrustworthy', 'shares_news', 'shares_biased',
+                          emotion_vars)]), ]  # features can be NaN if not enough data points
 
-z_features <- complete_features %>%
-  mutate(across(c(anger_baseline, fear_baseline, 
-                  anger_variability, fear_variability,
-                  anger_instability, fear_instability,
-                  anger_inertia, fear_inertia),
-                ~as.numeric(scale(.))))
+df <- complete_features %>%
+  mutate(across(all_of(c(emotion_vars, "log_n_scored")), ~ as.numeric(scale(.))))
 
-df <- z_features
-
-# whats the number of users? 
+# whats the number of users?
 nrow(df)
 ```
-```{r}
-m_news_base <- glm(shares_news ~ anger_baseline + fear_baseline,
-               data = df, family = binomial)
-
-m_news_variability <- glm(shares_news ~ anger_variability + fear_variability,
-               data = df, family = binomial)
-
-m_news_instability <- glm(shares_news ~ anger_instability + fear_instability,
-               data = df, family = binomial)
-
-m_news_inertia <- glm(shares_news ~ anger_inertia + fear_inertia,
-               data = df, family = binomial)
-
-vif(m_news_base); vif(m_news_variability);vif(m_news_instability); vif(m_news_inertia)
-```
-```{r}
-m_misinfo_base <- glm(shares_untrustworthy ~ anger_baseline + fear_baseline,
-               data = df, family = binomial)
-
-m_misinfo_variability <- glm(shares_untrustworthy ~ anger_variability + fear_variability,
-               data = df, family = binomial)
-
-m_misinfo_instability <- glm(shares_untrustworthy ~ anger_instability + fear_instability,
-               data = df, family = binomial)
-
-m_misinfo_inertia <- glm(shares_untrustworthy ~ anger_inertia + fear_inertia,
-               data = df, family = binomial)
-
-vif(m_misinfo_base); vif(m_misinfo_variability);vif(m_misinfo_instability); vif(m_misinfo_inertia)
-```
 
 ```{r}
-m_partisan_base <- glm(shares_biased ~ anger_baseline + fear_baseline,
-               data = df, family = binomial)
-
-m_partisan_variability <- glm(shares_biased ~ anger_variability + fear_variability,
-               data = df, family = binomial)
-
-m_partisan_instability <- glm(shares_biased ~ anger_instability + fear_instability,
-               data = df, family = binomial)
-
-m_partisan_inertia <- glm(shares_biased ~ anger_inertia + fear_inertia,
-               data = df, family = binomial)
-
-vif(m_partisan_base); vif(m_partisan_variability);vif(m_partisan_instability); vif(m_partisan_inertia)
+# one model per outcome and feature type: outcome ~ anger + fear [+ disgust] (z-standardized)
+fit_feature_model <- function(outcome, feature) {
+  rhs <- paste(EMOTIONS, feature, sep = "_")
+  if (CONTROLS == "activity") rhs <- c(rhs, "log_n_scored")
+  glm(reformulate(rhs, outcome), data = df, family = binomial)
+}
+outcomes <- c(news = "shares_news", misinfo = "shares_untrustworthy", partisan = "shares_biased")
+models <- lapply(outcomes, function(o) setNames(lapply(FEATURES, function(f) fit_feature_model(o, f)),
+                                              FEATURES))
+lapply(models, function(ms) lapply(ms, vif))
+lapply(models, function(ms) sapply(ms, function(m) round(exp(coef(m))[-1], 2)))
 ```
 
 
 
 # ===== ADD BOOTSTRAP UNCERTAINTY =====
 ```{r}
-boot_objects <- readRDS("users/user_models_tweet_boot.rds")
+boot_objects <- readRDS(paste0(users_dir, "/user_models_tweet_boot_", LANG,
+                               if (CONTROLS == "activity") "_activity" else "",
+                               if (DISGUST) "_disgust" else "", ".rds"))
 
 boot_news_base <- boot_objects$boot_news_base
 boot_news_var <- boot_objects$boot_news_var
@@ -295,7 +340,7 @@ boot_partisan_inertia <- boot_objects$boot_partisan_inertia
 ```{r}
 get_boot_cis <- function(boot_obj, outcome_name, feature_name) {
   param_names <- names(boot_obj$t0)
-  param_names <- param_names[param_names != "(Intercept)"] # skip intercept
+  param_names <- param_names[!param_names %in% c("(Intercept)", "log_n_scored")] # skip intercept and control
   indices <- which(names(boot_obj$t0) %in% param_names)
   
   ci_df <- data.frame(
@@ -340,8 +385,10 @@ boot_results_plot <- boot_results %>%
     OR_upper = exp(upper),
     emotion = case_when(
       grepl("anger", parameter) ~ "anger",
-      grepl("fear", parameter) ~ "fear"
+      grepl("fear", parameter) ~ "fear",
+      grepl("disgust", parameter) ~ "disgust"
     ),
+    emotion = factor(emotion, levels = EMOTIONS),
     feature = factor(feature, levels = c("baseline", "variability", "instability", "inertia")),
     outcome = factor(outcome, levels = c("any news", "partisan news", "untrustworthy news"))
   )
@@ -361,7 +408,7 @@ or_plot <- ggplot(boot_results_plot, aes(x = OR, y = feature, color = emotion)) 
   labs(x = "Odds Ratio (95% CI)",
        y = "Emotional Feature",
        color = "") +
-  scale_color_manual(values = c("anger" = "#e41a1c", "fear" = "#377eb8")) +
+  scale_color_manual(values = c("anger" = "#e41a1c", "fear" = "#377eb8", "disgust" = "#e69f00")) +
   custom_plot() +
   theme(
     legend.position = "bottom",
@@ -370,18 +417,20 @@ or_plot <- ggplot(boot_results_plot, aes(x = OR, y = feature, color = emotion)) 
     strip.background = element_rect(fill = "white", color = "black"),
     strip.text = element_text(face = "bold", size = 11))
 
-print(or_plot)
 
-# Figure 2a
-ggsave(file.path(dst, "features_boot_results.pdf"),
-       or_plot,
-       width = 6.5, height = 4.5, dpi = 300)
+ggsave(paste0(users_dir, "/boot_results_plot", tag, ".png"), 
+       or_plot, 
+       width = 6.5, 
+       height = 4.5, 
+       dpi = 300)
+
+print(or_plot)
 ```
 
 
 ## SAVE FOR PAPER
 ```{r}
-ggsave(file.path(dst, "features_hist.pdf"), 
+ggsave(file.path(dst, paste0("figures/features_hist", tag, ".pdf")), 
           dist_plot, 
           width = 6.5, height = 4,
           dpi=300)
@@ -393,8 +442,7 @@ user_latex <- kable(user_table,
                     align = c("l", "c", "c"),
                     escape = FALSE)
 
-# Table S15: News behavior of users (sharing proportions)
-out <- file.path(dst, "user_table.tex")
+out <- file.path(dst, "tables", paste0("user_table", tag, ".tex"))
 writeLines(as.character(user_latex), out)
 ```
 
@@ -429,8 +477,11 @@ create_latex_table <- function(models, model_names, filename) {
   latex <- paste0(latex, "\\hline\n")
 
 
-  for (term in c("anger", "fear")) {
-    latex <- paste0(latex, ifelse(term == "anger", "Anger", "Fear"))
+  terms <- c(EMOTIONS, if (CONTROLS == "activity") "log_n_scored")
+  term_labels <- c(anger = "Anger", fear = "Fear", disgust = "Disgust",
+                   log_n_scored = "Log classified tweets")
+  for (term in terms) {
+    latex <- paste0(latex, term_labels[[term]])
     for (i in 1:length(models)) {
       coef_row <- coefs[[i]][grep(term, coefs[[i]]$term, ignore.case = TRUE), ]
       if (nrow(coef_row) > 0) {
@@ -471,34 +522,23 @@ create_latex_table <- function(models, model_names, filename) {
   latex <- paste0(latex, "\\multicolumn{", length(models)+1, "}{l}{\\footnotesize $^{***}$p$<$0.001; $^{**}$p$<$0.01; $^{*}$p$<$0.05} \\\\\n")
   latex <- paste0(latex, "\\end{tabular}\n")
 
-  # Tables S16 (news), S17 (untrustworthy), S18 (partisan)
-  writeLines(latex, file.path(dst, filename))
+  writeLines(latex, file.path(dst, "tables", sub("\\.tex$", paste0(tag, ".tex"), filename)))
   cat("LaTeX table written to", filename, "\n")
 }
 
 
-create_latex_table(
-  list(m_news_base, m_news_variability, m_news_instability, m_news_inertia),
-  c("Baseline", "Variability", "Instability", "Inertia"),
-  "table_news_models.tex"
-)
-
-create_latex_table(
-  list(m_misinfo_base, m_misinfo_variability, m_misinfo_instability, m_misinfo_inertia),
-  c("Baseline", "Variability", "Instability", "Inertia"),
-  "table_misinfo_models.tex"
-)
-
-create_latex_table(
-  list(m_partisan_base, m_partisan_variability, m_partisan_instability, m_partisan_inertia),
-  c("Baseline", "Variability", "Instability", "Inertia"),
-  "table_partisan_models.tex"
-)
+for (o in names(outcomes)) {
+  create_latex_table(models[[o]], c("Baseline", "Variability", "Instability", "Inertia"),
+                     paste0("table_", o, "_models.tex"))
+}
 ```
 
 ```{r}
-ggsave(file.path(dst,"pca_scree_plot.pdf"), 
-       pca_scree)
+ggsave(file.path(dst, paste0("figures/pca_scree_plot", tag, ".pdf")), 
+       pca_scree, 
+       width = 6.5, 
+       height = 4.5, 
+       dpi = 300)
 ```
 
 ```{r}

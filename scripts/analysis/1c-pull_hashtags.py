@@ -1,10 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Aggregate tweet-level hashtags to a daily list per observation day.
-#         Filters to the analysis sample and observation period before aggregating.
-# Input:  <DATA_DIR>/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz
-#         <DATA_DIR>/authors_filtered.csv
-# Output: <DATA_DIR>/Austria-Panel-Daily-Hashtags.csv
-# Usage:  python 1b-aggregate_hashtags.py <DATA_DIR>
+# Task:   Daily list of hashtags (for the outlier table in 2-describe_time_series.Rmd).
+# Input:  data/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz (not released)
+#         data/authors_filtered.csv
+# Output: data/Austria-Panel-Daily-Hashtags.csv (not released)
+# Run:    python 1c-pull_hashtags.py ../../data
 
 import polars as pl
 from os.path import join

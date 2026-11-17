@@ -1,14 +1,31 @@
 # Emotions and Misinformation in the Austrian Twitter Panel
 
-Public repository for the data collection and analysis code to reproduce the statistical analysis. After downloading and unzipping the data from [OSF](https://osf.io/3qhcv/overview?view_only=fdd5ac1d11e74af0b8ee618f862d5ddd), place the `data/` folder into the main directory (i.e., on the same level as the `scripts/` folder). We provide an `environment.yml` to re-create the conda environment (`conda env create -f environment.yml`) and a `requirements.txt` for pip-based installation.
+Public repository for the data collection and analysis code to reproduce the statistical analysis. After downloading and unzipping the data from [OSF](https://osf.io/3qhcv/overview?view_only=fdd5ac1d11e74af0b8ee618f862d5ddd), place the `data/` folder into the main directory (i.e., on the same level as the `scripts/` folder).
+
+## Software
+
+The results were produced with R 4.3.1 and Python 3.11.
+
+- **R (pinned):** install R 4.3.1, then run `install.packages("renv"); renv::restore()` from the repository root and choose to activate the project when asked. This installs the exact package versions recorded in `renv.lock` (224 CRAN packages, including all dependencies) into a project library. Pandoc is needed to render the `.Rmd` files (it ships with RStudio). On Linux, some packages are built from source and need system libraries, e.g. on Debian/Ubuntu: `sudo apt install libfontconfig1-dev libfreetype6-dev libfribidi-dev libharfbuzz-dev libx11-dev libxml2-dev pandoc`.
+- **Python (pinned):** `pip install -r requirements.txt`. Only needed for the scripts that build the released files from restricted data.
+- **Conda (quick, not pinned):** `conda env create -f environment.yml` installs R, Python and all packages, but in their current versions, which can differ slightly from the ones we used.
+
+The bootstraps in `5-boot_features_models.R` and `8-boot_window_models.R` run in parallel (20 and 15 cores). With multithreaded BLAS libraries (e.g. OpenBLAS in conda R), set `export OPENBLAS_NUM_THREADS=1` before running them; otherwise each worker starts one thread per core and the machine is heavily oversubscribed. This does not change the results.
 
 ## How to reproduce
 
-To reproduce the **main time-series results** (Figures 1, S2–S6, S11; Tables S2–S14), download and unzip emomis-austria-data.tar.gz, and place data/ at the same level as scripts/ (see repository tree below). Then, run scripts `2-describe_time_series.Rmd`, `3a-test_var.Rmd`, and `3b-boot_irf.R` from `scripts/analysis/`. 
+To reproduce the **main time-series results**, download and unzip the data archive, and place data/ at the same level as scripts/ (see repository tree below). Then run `2-describe_time_series.Rmd`, `2b-plot_time_series.Rmd` and `3a-test_var.Rmd` from `scripts/analysis/`. `3a-test_var.Rmd` also computes the bootstrapped impulse responses and the SI robustness checks.
 
-To reproduce the **user-level results** (Figures 2, S10, S12–S17; Tables S15–S22), place the anonymized files from `data/` and run scripts `5-boot_features_models.R` through `13-analyze_cohorts.Rmd` in order. 
+To reproduce the **user-level results**, place the anonymized files from `data/` and run, in this order: `5-boot_features_models.R`, `6-analyze_features.Rmd`, `8-boot_window_models.R` (once for `1h`, once for `24h`), `11-analyze_supersharers.Rmd`, `9-analyze_windows.Rmd` and `13-analyze_cohorts.Rmd`. Scripts `4`, `7` and `10` produce the released user-level files from tweet-level data and are not part of the reproduction (see Reproducibility boundary).
 
-All figures and tables are written to `output/`. Scripts are designed to be run from `scripts/analysis/` as the working directory, or knitted directly from an RStudio project at the repository root.
+Figures are written to `output/figures/`, LaTeX tables to `output/tables/`, and bootstrapped user models to `output/users/`. Scripts are designed to be run from `scripts/analysis/` as the working directory, or knitted directly from an RStudio project at the repository root.
+
+See `CHANGELOG.md` for the changes since the first submission (v1.0).
+
+### Main specification and variants
+
+- **Languages:** emotion scores are used for German and English tweets only (`lang = de_en`, the languages the classifier was validated on) so most scripts take a `lang` argument (`de_en` = main, `de`, `all`), and output files carry a matching suffix, e.g. `Austria-Panel-Daily-de_en.csv`.
+- **Emotion presence:** a tweet expresses an emotion if its score is ≥ 0.65. 
 
 ## Dataset
 
@@ -25,8 +42,9 @@ scripts/
     emotions/         Text cleaning and emotion inference
     trustworthiness/  URL expansion, domain extraction, NewsGuard matching
   analysis/           Aggregation, feature extraction, statistical modeling, visualization
+    robustness/       Robustness checks and reviewer responses (mostly need restricted data)
 data/                 All input and intermediate data files (not committed to git)
-output/               Figures and tables (not committed to git)
+output/               figures/, tables/, users/ (not committed to git)
 ```
 
 ## Reproduction of analysis
@@ -34,7 +52,7 @@ output/               Figures and tables (not committed to git)
 The repository is organized into four stages: `data collection`, `data_preparation`, `inference`, and all statistical analyses and visualizations in `analysis`.
 
 - `data_preparation/` and `inference/` scripts handle data collection and wrangling. **Most of these steps cannot be reproduced** without access to the raw data or the APIs (see Restrictions).
-- The `analysis/` scripts can be reproduced starting from `Austria-Panel-Daily.csv` (time series analysis) or from anonymized user-level feature files (user-level analysis). See the restrictions below.
+- The `analysis/` scripts can be reproduced starting from `Austria-Panel-Daily-de_en.csv` (time series analysis) or from anonymized user-level feature files (user-level analysis). See the restrictions below.
 
 ### Restrictions
 
@@ -42,7 +60,7 @@ There are three major restrictions to fully reproducing the study:
 
 1. **Raw tweet text and user IDs:** Due to Twitter's Terms of Service and GDPR considerations, we cannot publish raw text. We provide anonymized datasets with numeric IDs replaced by sequential integers and all raw text removed. The emotion scores and domain-level aggregates are included in the released data.
 
-2. **NewsGuard scores:** The NewsGuard database is proprietary. We cannot publish domain ratings or names. The analysis uses aggregated daily statistics derived from these ratings (`Austria-Panel-Daily.csv`), which are safe to release. The trustworthiness inference pipeline cannot be reproduced without a NewsGuard license.
+2. **NewsGuard scores:** The NewsGuard database is proprietary. We cannot publish domain ratings or names. The analysis uses aggregated daily statistics derived from these ratings (`Austria-Panel-Daily-<lang>.csv`, `Austria-Panel-Daily-Thresholds.csv`), which are safe to release. The trustworthiness inference pipeline cannot be reproduced without a NewsGuard license.
 
 3. **Data collection:** Raw data is collected from the Brandwatch API. A Brandwatch account with access to the relevant project and query IDs is required; these steps cannot be reproduced without API credentials. Due to the closure of the Twitter API, the data cannot be rehydrated. 
 
@@ -66,7 +84,7 @@ Raw data arrives as gzipped Brandwatch JSON exports. The preparation pipeline ex
 - `5-concat_user_data.py`: concatenate all per-file user CSVs, deduplicate by `author_id` --> `Austria-Panel-Users.csv.gz`
 - `6-filter_authors.py`: apply activity filter (< 20 tweets/day) and follower filter (50–100,000) --> `authors_filtered.csv` (29,291 users)
 - `7-remove_user_columns.py`: strip PII columns (`username`, `name`, `location`, etc.) from `Austria-Panel-Tweets.csv.gz` 
-- `8-anonymize_ids.py`: replace real `author_id` and tweet `event_id` values with randomized sequential integers across all releasable files (`authors_filtered.csv`, `Austria-Panel-Users-Features-Tweet.csv`, `Austria-Panel-Users-Daily.csv.gz`, `Austria-Panel-User-Statistics.csv`, `Austria-Panel-Supersharers.csv`, `Austria-Panel-Tweets-Windows-1h-10min.csv.gz`, `Austria-Panel-Tweets-Windows-24h-10min.csv.gz`); output is gzip-compressed --> `data/` (mapping is not saved and cannot be reversed).
+- `8-anonymize_ids.py`: replace real `author_id` and tweet `event_id` values with randomized sequential integers across all releasable files (`authors_filtered.csv`, `Austria-Panel-Daily-{de_en,de,all}.csv`, `Austria-Panel-Daily-Thresholds.csv`, `Austria-Panel-Users-Features-Tweet-{de_en,de}.csv`, `Austria-Panel-Users-Daily.csv.gz`, `Austria-Panel-User-Statistics.csv`, `Austria-Panel-Supersharers.csv`, `Austria-Panel-Supersharers-Groups.csv`, `Austria-Panel-Windows-{1h,24h}-10min-de_en.csv.gz`). One mapping is used for all files in a run, so user-level joins still work. The script stops if an ID is missing from the mapping or an identifying column remains. Output is gzip-compressed --> `data/` (mapping is not saved and cannot be reversed).
 
 ## Inference
 
@@ -77,6 +95,8 @@ Emotion inference uses the fine-tuned mDeBERTa model `pol_emo_mDeBERTa` (stored 
 - `1-prepare_text.py`: clean tweet text (remove emojis, URLs, mentions, retweets) --> `emotions/Austria-Panel-Text.csv.gz`
 - `2-split_files.py`: split into 30M-row chunks for parallel GPU inference --> `emotions/split_files/`
 - `3-infer_emotion_split.py`: apply mDeBERTa model --> `emotions/emotion_inference.csv.gz`
+- `4-sample_validation_v2.py`: draw a stratified German and English annotation sample for validation --> `emotions/validation/`
+- `5-evaluate_validation_v2.py`: weighted AUC, precision, recall and F1 (at 0.5 and 0.65), inter-rater agreement and ROC figure
 
 ### Trustworthiness
 
@@ -97,100 +117,116 @@ Trustworthiness scores come from matching tweet URLs against the NewsGuard domai
 
 ### Aggregation and feature extraction
 
-- `1-aggregate_data.py`: aggregate to a daily time series --> `Austria-Panel-Daily.csv` 
+- `1-aggregate_data.py`: aggregate to a daily time series --> `Austria-Panel-Daily-<lang>.csv`
+- `1b-aggregate_thresholds.py`: daily untrustworthy-news counts at NewsGuard cutoffs 40, 50, 60 and 70 --> `Austria-Panel-Daily-Thresholds.csv` (read by `3a-test_var.Rmd`)
+- `1c-pull_hashtags.py`: aggregate tweet-level hashtags to a daily list --> `Austria-Panel-Daily-Hashtags.csv` (not released; read by the last section of `2-describe_time_series.Rmd`, which is skipped without it)
 
 ______
 
-**From here on the main analysis steps are reproducible!**
-- `2-describe_time_series.Rmd`: univariate series description, summary statistics, and main time series figures
-- `3a-test_var.Rmd`: VAR model diagnostics on the daily time series (lag selection, Granger causality, residual checks)
-- `3b-boot_irf.R`: bootstrap Impulse Response Functions from the VAR model → `data/IRF/`
-- `4-extract_features.py`: compute per-user emotion dynamics features (baseline, variability, instability, inertia) and news-sharing counts → `Austria-Panel-Users-Features-Tweet.csv` and `Austria-Panel-Users-Daily.csv.gz`
-- `5-boot_features_models.R`: bootstrap logistic/linear regressions testing whether emotion features predict news sharing → `scripts/analysis/users/user_models_tweet_boot.rds`
-- `6-analyze_features.Rmd`: user emotion feature distributions and bootstrap regression results
-- `7-aggregate_windows.py`: extract tweet windows before and after news-sharing events (±1h and ±24h) → `Austria-Panel-Windows-{1h,24h}-10min.csv.gz`
-- `8-boot_window_models.R`: bootstrap LMER models testing whether untrustworthy news exposure affects subsequent emotion → `scripts/analysis/windows_models/windows_10_{1h,24h}/`
+**From here on the main analysis steps are reproducible**, except the scripts marked *(restricted)*, which build the released files from tweet-level data.
+- `2-describe_time_series.Rmd`: univariate series description, summary statistics, ARIMA models (orders from `auto.arima`), outlier table with top hashtags, and main time series figures
+- `2b-plot_time_series.Rmd`: descriptive time series figures (Fig. 2, histograms, daily series); the NewsGuard domain plot runs only with the restricted NewsGuard data
+- `3a-test_var.Rmd`: VAR in levels (Cholesky order untrustworthy → fear → anger; news share and two break dummies as exogenous variables), wild-bootstrap Granger tests, bootstrapped IRFs and FEVD, and the SI robustness section (German only, all languages, Q3, 0.5, first-submission specification, disgust, 3-day rolling mean, NewsGuard cutoff 50)
+- `4-extract_features.py` *(restricted)*: compute per-user emotion dynamics features (baseline, variability, instability, inertia), activity counts (`n_tweets`, `n_scored`) and news-sharing counts → `Austria-Panel-Users-Features-Tweet-<lang>.csv`; for `lang = de_en` also `Austria-Panel-Users-Daily.csv.gz`
+- `5-boot_features_models.R`: bootstrap logistic/linear regressions testing whether emotion features predict news sharing → `output/users/user_models_tweet_boot_<lang>[_activity][_disgust].rds`
+- `6-analyze_features.Rmd`: user emotion feature distributions and bootstrap regression results (parameters `lang`, `controls`, `disgust`)
+- `7-aggregate_windows.py` *(restricted)*: extract tweet windows before and after news-sharing events (±1h and ±24h) → `Austria-Panel-Windows-{1h,24h}-10min-<lang>.csv.gz`
+- `8-boot_window_models.R`: bootstrap LMER models testing whether untrustworthy news exposure affects subsequent emotion → `scripts/analysis/windows_models/windows_10_{1h,24h}_<lang>/`
 - `9-analyze_windows.Rmd`: event window comparisons and LMER model results
-- `10-aggregate_user_stats.py`: compute per-user summary statistics → `Austria-Panel-User-Statistics.csv`
-- `11-analyze_supersharers.Rmd`: identify misinformation supersharers → `Austria-Panel-Supersharers.csv` (required by `12c-pull_sources.py`)
+- `10-aggregate_user_stats.py` *(restricted)*: compute per-user summary statistics → `Austria-Panel-User-Statistics.csv`
+- `11-analyze_supersharers.Rmd`: identify misinformation supersharers → `Austria-Panel-Supersharers.csv` (required by `12c-pull_sources.py`) and `Austria-Panel-Supersharers-Groups.csv` (groups by news sharing only; required by `12d-analyze_replies.Rmd`)
 - `12a-pull_replies.py`: build the full reply network → `Austria-Panel-Network-Edges.csv.gz`, `Austria-Panel-Network-Nodes.csv.gz`
 - `12b-pull_replies_internal.py`: build the internal reply network (sample-only edges) → `Austria-Panel-Network-Edges-Internal.csv`, `Austria-Panel-Network-Nodes-Internal.csv`
 - `12c-pull_sources.py`: build the domain co-sharing network among supersharers → `Austria-Panel-Source-Edges.csv`, `Austria-Panel-Source-Nodes.csv`
 - `12d-analyze_replies.Rmd`: reply network analysis → `output/figures/edge_node_distributions.pdf`, `output/figures/combined_supersharer_networks.png`, `output/tables/network_comparison.tex`
 - `13-analyze_cohorts.Rmd`: cohort comparison (new vs. existing accounts around 2022 structural breaks) → `output/figures/user_joins.pdf`
-- `14a-pull_hashtags.py`: aggregate tweet-level hashtags to a daily list → `Austria-Panel-Daily-Hashtags.csv`
-- `14b-analyze_hashtags.Rmd`: join top hashtags onto outlier dates → `output/tables/outliers.tex`
 - `15-analyze_domains.Rmd`: domain trustworthiness distribution and changes over time (Jun–Oct 2022)
 
 
-All Rmd scripts write figures and tables to `output/`.
+All Rmd scripts write figures to `output/figures/` and tables to `output/tables/`.
+
+### Robustness checks (`scripts/analysis/robustness/`)
+
+These scripts support SI analyses and the response to reviewers. Most need tweet-level data and cannot be run on the released files (see each script's header).
+
+- `newsguard_robustness.Rmd`: false-content criterion, threshold sensitivity and sources of the 2022 increase (domain- and user-level sections removed for release)
+- `extract_untrustworthy_links.py`: extract untrustworthy links for the NewsGuard checks (output contains author IDs and is not released)
+- `describe_language.py`: language shares in the panel
+- `plot_emotion_distributions.py`: emotion score distributions with mean, median, Q3, 0.5 and 0.65
+- `describe_feature_timescales.py`: variance decomposition and daily/weekly/monthly windows for instability and inertia
 
 ## Reproducibility boundary
 
-**Fully reproducible from `Austria-Panel-Daily.csv`** (no raw text, no user IDs, no direct NewsGuard scores): `2-describe_time_series.Rmd`, `3a-test_var.Rmd`, `3b-boot_irf.R`.
+**Fully reproducible from the daily aggregates** (`Austria-Panel-Daily-<lang>.csv`, `Austria-Panel-Daily-Thresholds.csv`; no raw text, no user IDs, no direct NewsGuard scores): `2-describe_time_series.Rmd`, `2b-plot_time_series.Rmd`, `3a-test_var.Rmd`.
 
-**Reproducible from anonymized user features** (requires files from `data/`): `4-extract_features.py`, `5-boot_features_models.R`, `6-analyze_features.Rmd`, `7-aggregate_windows.py`, `8-boot_window_models.R`, `9-analyze_windows.Rmd`, `10-aggregate_user_stats.py`, `11-analyze_supersharers.Rmd`, `13-analyze_cohorts.Rmd`.
+**Reproducible from the anonymized user-level files** (released in `data/`): `5-boot_features_models.R`, `6-analyze_features.Rmd`, `8-boot_window_models.R`, `9-analyze_windows.Rmd`, `11-analyze_supersharers.Rmd`, `13-analyze_cohorts.Rmd`.
 
-**Not reproducible without restricted data:** the inference pipeline requires raw tweet text and the full NewsGuard database; network analyses (`12a-pull_replies.py`, `12d-analyze_replies.Rmd`) require the reply structure with user IDs, which cannot be released due to Twitter's Terms of Service.
+**Restricted: scripts that create the released user-level files** (`4-extract_features.py`, `7-aggregate_windows.py`, `10-aggregate_user_stats.py`). They do not need tweet text, but they read the tweet-level file `Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz` (tweet and user IDs, exact timestamps and per-tweet NewsGuard ratings) and the tweet-level emotion scores. This file is not released: per-tweet NewsGuard ratings fall under the NewsGuard licence (Restriction 2), and exact per-user tweet timestamps could be matched against public tweet archives to re-identify users. Their outputs are released in anonymized form (`Users-Features-Tweet`, `Users-Daily`, `Windows`, `User-Statistics`). The same applies to `1-aggregate_data.py`, `1b-aggregate_thresholds.py` and `1c-pull_hashtags.py` for the daily files.
+
+**Not reproducible without restricted data:** the inference pipeline requires raw tweet text and the full NewsGuard database; network analyses (`12a`–`12d`) require the reply structure with user IDs, which cannot be released due to Twitter's Terms of Service. `15-analyze_domains.Rmd` needs NewsGuard domain data. The scripts in `robustness/` and the validation scripts in `inference/emotions/` need tweet-level data.
 
 ## Figures
 
-All figures are written to `output/`. The table below maps each output file to the script that generates it.
+Numbering follows the revised manuscript (`main.tex`, `supplementary.tex`). **Bold** = reproducible from the released data. Figures are written to `output/figures/`.
 
 | Paper | Output file | Script | Description |
 |---|---|---|---|
-| **Fig. 1** | `desc_prop_plot.pdf` | `2-describe_time_series.Rmd` | Weekly tweet volume (a) and stacked trustworthy/untrustworthy news proportions (b) with event markers |
-| **Fig. 2a** | `features_boot_results.pdf` | `6-analyze_features.Rmd` | Odds ratios (bootstrapped 95% CIs) for emotion features predicting any, partisan, and untrustworthy news sharing |
-| **Fig. 2b** | `supersharers_cdf.pdf` | `11-analyze_supersharers.Rmd` | CDF of news sharing concentration — 0.5% of users account for 80% of untrustworthy shares |
-| **Fig. 2c** | `supersharers_emotion_comparison.pdf` | `11-analyze_supersharers.Rmd` | Anger baseline, instability, and variability distributions for trustworthy vs. untrustworthy news sharers |
-| Fig. S1 | *(ROC curves)* | not in repo | AUC curves for anger (0.85) and fear (0.84) emotion classifier validation — requires annotation data |
-| **Fig. S2** | `vars_histograms.pdf` | `2-describe_time_series.Rmd` | Histograms of all daily proportion variables used in the analysis |
-| **Fig. S3** | `desc_daily.pdf` | `2-describe_time_series.Rmd` | Daily tweet count and news-link count time series |
-| **Fig. S4** | `trustworthiness_daily.pdf` | `2-describe_time_series.Rmd` | Daily avg. NewsGuard score and proportion of untrustworthy links |
-| **Fig. S5** | `emotions_daily.pdf` | `2-describe_time_series.Rmd` | Daily proportion of angry and fearful tweets |
-| **Fig. S6** | `score_intervention.pdf` | `2-describe_time_series.Rmd` | ARIMA intervention analysis: two structural breaks in trustworthiness (Jul and Aug 2022) |
-| Fig. S7 | *(newsguard monthly avg)* | not in repo | Average NewsGuard rating per month in the database — requires proprietary NewsGuard data |
-| **Fig. S8** | `domains_classification_prop.pdf` | `15-analyze_domains.Rmd` | Classification of untrustworthy domains (stable/downrated/first appearance) Jun–Oct 2022 |
-| **Fig. S9** | `untrustworthy_domains_spikes.pdf` | `15-analyze_domains.Rmd` | Daily count of untrustworthy domains shared during the unstable period, with spike markers |
-| **Fig. S10** | `user_joins.pdf` | `13-analyze_cohorts.Rmd` | New vs. old account activity and untrustworthy sharing during 2022 structural breaks |
-| **Fig. S11** | `irf_plot.pdf` | `3a-test_var.Rmd` | VAR impulse response functions: response of misinformation, anger, and fear to a 10% shock in each variable |
-| **Fig. S12** | `features_hist.pdf` | `6-analyze_features.Rmd` | Histograms of all eight user-level emotion features before transformation |
-| **Fig. S13** | `pca_scree_plot.pdf` | `6-analyze_features.Rmd` | PCA scree plot: three components explain 87.1% of variance in emotion features |
-| **Fig. S14** | `window_tweet_distributions.pdf` | `9-analyze_windows.Rmd` | Distribution of tweets per user in 1h and 24h windows before/after a news-sharing event |
-| **Fig. S15** | `boot_means_comparison.pdf` | `9-analyze_windows.Rmd` | Sensitivity analysis: stability of mean anger/fear estimates as a function of tweets sampled |
-| **Fig. S16** | `emotions_models_compared.pdf` | `9-analyze_windows.Rmd` | Comparison of OLS (lm) and mixed-effects (lmer) coefficients for 1h and 24h windows |
-| **Fig. S17** | `windows_emotions_coefs.pdf` | `9-analyze_windows.Rmd` | Bootstrap coefficients: anger and fear before, after, and change around news-sharing events (1h and 24h) |
-| **Fig. S18** | `combined_supersharer_networks.png` | `12d-analyze_replies.Rmd` | Internal reply networks for untrustworthy vs. trustworthy news supersharers |
-| **Fig. S19** | `edge_node_distributions.pdf` | `12d-analyze_replies.Rmd` | Reply edge distribution and degree distributions inside vs. outside the sample |
+| **Fig. 1** | `individual_plot.pdf` | `9-analyze_windows.Rmd` | Individual-level predictors of news sharing: odds ratios of the emotion features, concentration of news sharing, emotion features of supersharers |
+| **Fig. 2** | `desc_prop_plot.pdf` | `2b-plot_time_series.Rmd` | Activity on Austrian Twitter 2019–2023 (weekly averages of daily counts) with event markers |
+| **Fig. S1** | `desc_daily.pdf` | `2b-plot_time_series.Rmd` | Daily tweeting activity, news shared and trustworthiness |
+| **Fig. S2** | `vars_histograms.pdf` | `2b-plot_time_series.Rmd` | Histograms of the daily variables used in the analysis |
+| Fig. S3 | `domains_plot.pdf` | `2b-plot_time_series.Rmd` | Average NewsGuard rating per month — requires the licensed NewsGuard data |
+| **Fig. S4** | `trustworthiness_daily.pdf` | `2b-plot_time_series.Rmd` | Daily trustworthiness score and share of untrustworthy news |
+| **Fig. S5** | `emotions_daily.pdf` | `2b-plot_time_series.Rmd` | Daily share of angry and fearful tweets |
+| Fig. S6 | `emotion_distributions.pdf` | `robustness/plot_emotion_distributions.py` | Distributions of tweet-level anger and fear scores — requires tweet-level data |
+| Fig. S7 | `roc_curve_v2_weighted_no_disgust.pdf` | `inference/emotions/5-evaluate_validation_v2.py` | Weighted ROC curves of the classifier validation (German, English) — requires the annotations |
+| **Fig. S8** | `features_hist.pdf` | `6-analyze_features.Rmd` | Histograms of the user features before transformation |
+| **Fig. S9** | `pca_scree_plot.pdf` | `6-analyze_features.Rmd` | Scree plot of the principal components of the emotion features |
+| **Fig. S10** | `window_tweet_distributions.pdf` | `9-analyze_windows.Rmd` | Tweets per user before and after sharing a news tweet |
+| **Fig. S11** | `boot_means_comparison.pdf` | `9-analyze_windows.Rmd` | Sensitivity of the mean emotion estimates to the number of tweets sampled |
+| **Fig. S12** | `emotions_models_compared.pdf` | `9-analyze_windows.Rmd` | Comparison of the window models (lm vs. lmer, 1h vs. 24h) |
+| **Fig. S13** | `windows_emotions_coefs.pdf` | `9-analyze_windows.Rmd` | Emotional expression before and after sharing news |
+| Fig. S14 | `combined_supersharer_networks.png` | `12d-analyze_replies.Rmd` | Internal reply networks of untrustworthy and trustworthy news supersharers — requires the reply network |
+| Fig. S15 | `edge_node_distributions.pdf` | `12d-analyze_replies.Rmd` | Reply edges by direction and degree distributions — requires the reply network |
+| **Fig. S16** | `score_intervention.pdf` | `2-describe_time_series.Rmd` | Two structural breaks in trustworthiness (1 July and 28 August 2022) |
+| Fig. S17 | `domains_classification_prop.pdf` | `15-analyze_domains.Rmd` | Classification of the domains shared from July 2022 — requires NewsGuard domain data |
+| Fig. S18 | `untrustworthy_domains_spikes.pdf` | `15-analyze_domains.Rmd` | Untrustworthy domains shared from July 2022 with spike days — requires NewsGuard domain data |
+| **Fig. S19** | `user_joins.pdf` | `13-analyze_cohorts.Rmd` | Users joining the platform and their untrustworthy news sharing |
+| Fig. S20 | `ng_thresholds.pdf` | `robustness/newsguard_robustness.Rmd` | Weekly share of untrustworthy and trustworthy news at different NewsGuard cutoffs — the figure itself only needs `Austria-Panel-Daily-Thresholds.csv`, but earlier sections of the script need the licensed NewsGuard data |
+| **Fig. S21** | `irf_plot.pdf` | `3a-test_var.Rmd` | Impulse response functions of the VAR(3) |
+| **Fig. S22** | `irf_plot_90d.pdf` | `3a-test_var.Rmd` | Impulse response functions over 90 days |
 
 ## Tables
 
-All LaTeX tables are written to `output/`. Main text Table 1 and supplementary Table S1 are manually written.
+LaTeX tables are written to `output/tables/`. Table 1 (`tables/emotion_measures`, overview of the user-level variables) is written by hand.
 
 | Paper | Output file | Script | Description |
 |---|---|---|---|
-| Table 1 | — | manually written | Overview of user-level emotion dynamic variables |
-| Table S1 | — | manually written | Summary of ARIMA dynamics across all four variables |
-| **Table S2** | `arima_count.tex` | `2-describe_time_series.Rmd` | ARIMA model for tweet activity |
-| **Table S3** | `outliers.tex` | `14b-analyze_hashtags.Rmd` | Detected outliers in tweet activity with top hashtags |
-| **Table S4** | `arima_news.tex` | `2-describe_time_series.Rmd` | ARIMA model for news sharing |
-| **Table S5** | `arima_anger.tex` | `2-describe_time_series.Rmd` | ARIMA model for anger expression |
-| **Table S6** | `arima_fear.tex` | `2-describe_time_series.Rmd` | ARIMA model for fear expression |
-| **Table S7** | `score_intervention.tex` | `2-describe_time_series.Rmd` | ARIMA intervention model for trustworthiness (two structural breaks) |
-| **Table S8** | `correlation_table.tex` | `3a-test_var.Rmd` | Correlation matrix between all time series variables |
-| **Table S9** | `unit_root_table.tex` | `3a-test_var.Rmd` | Unit root tests (ADF, PP, KPSS) for all series |
-| **Table S10** | `jo_results_table.tex` | `3a-test_var.Rmd` | Johansen cointegration test results |
-| **Table S11** | `diagnostics_table.tex` | `3a-test_var.Rmd` | VAR model diagnostics (lag selection) |
-| **Table S12** | `var_summary_table.tex` | `3a-test_var.Rmd` | VAR model summary (lag=9) |
-| **Table S13** | `granger_table.tex` | `3a-test_var.Rmd` | Granger causality test results |
-| **Table S14** | `fevd_table.tex` | `3a-test_var.Rmd` | Forecast error variance decomposition |
-| **Table S15** | `user_table.tex` | `6-analyze_features.Rmd` | News sharing behavior of users after dichotomizing outcome variables |
-| **Table S16** | `table_news_models.tex` | `6-analyze_features.Rmd` | Logistic regression predicting any news sharing |
-| **Table S17** | `table_misinfo_models.tex` | `6-analyze_features.Rmd` | Logistic regression predicting untrustworthy news sharing |
-| **Table S18** | `table_partisan_models.tex` | `6-analyze_features.Rmd` | Logistic regression predicting partisan news sharing |
-| **Table S19** | `emotions_before.tex` | `9-analyze_windows.Rmd` | LMER: emotion before sharing predicting news trustworthiness |
-| **Table S20** | `emotions_after.tex` | `9-analyze_windows.Rmd` | LMER: emotion after sharing predicted by news trustworthiness |
-| **Table S21** | `emotions_change.tex` | `9-analyze_windows.Rmd` | LMER: within-person change in emotion around sharing events |
-| **Table S22** | `windows_random_effects.tex` | `9-analyze_windows.Rmd` | Random effects structure across all window models |
-| **Table S23** | `network_comparison.tex` | `12d-analyze_replies.Rmd` | Network statistics: untrustworthy vs. trustworthy supersharer reply networks |
-| **Table S24** | `replies_latex.tex` | `12d-analyze_replies.Rmd` | Descriptive statistics for reply network (inside vs. outside sample) |
+| Table 1 | — | written by hand | Overview of the user-level variables |
+| **Table S1** | `user_table.tex` | `6-analyze_features.Rmd` | News sharing of users after dichotomizing the outcomes |
+| **Table S2** | `table_news_models.tex` | `6-analyze_features.Rmd` | Logistic regressions predicting sharing any news |
+| **Table S3** | `table_misinfo_models.tex` | `6-analyze_features.Rmd` | Logistic regressions predicting sharing untrustworthy news |
+| **Table S4** | `table_partisan_models.tex` | `6-analyze_features.Rmd` | Logistic regressions predicting sharing partisan news |
+| **Table S5** | `emotions_before.tex` | `9-analyze_windows.Rmd` | Mixed models: emotional expression before sharing predicting untrustworthy news |
+| **Table S6** | `emotions_after.tex` | `9-analyze_windows.Rmd` | Mixed models: emotional expression after sharing |
+| **Table S7** | `emotions_change.tex` | `9-analyze_windows.Rmd` | Mixed models: within-person change in emotional expression |
+| **Table S8** | `windows_random_effects.tex` | `9-analyze_windows.Rmd` | Random effects of the window models |
+| Table S9 | `network_comparison.tex` | `12d-analyze_replies.Rmd` | Reply network statistics of untrustworthy vs. trustworthy news supersharers — requires the reply network |
+| Table S10 | `replies_latex.tex` | `12d-analyze_replies.Rmd` | Replies inside vs. outside the sample — requires the reply network |
+| **Table S11** | `arima_count.tex` | `2-describe_time_series.Rmd` | ARIMA model for tweet activity |
+| Table S12 | `outliers.tex` | `2-describe_time_series.Rmd` | Outliers in tweet activity with the top 3 hashtags — requires the hashtags file, which is not released |
+| **Table S13** | `arima_news.tex` | `2-describe_time_series.Rmd` | ARIMA model for news sharing |
+| **Table S14** | `arima_anger.tex` | `2-describe_time_series.Rmd` | ARIMA model for anger |
+| **Table S15** | `arima_fear.tex` | `2-describe_time_series.Rmd` | ARIMA model for fear |
+| **Table S16** | `score_intervention.tex` | `2-describe_time_series.Rmd` | ARIMA model with intervention for trustworthiness |
+| **Table S17** | `correlation_matrix.tex` | `3a-test_var.Rmd` | Correlations between all daily variables |
+| **Table S18** | `unit_root_table.tex` | `3a-test_var.Rmd` | Unit root tests (ADF, PP, KPSS) |
+| **Table S19** | `jo_results_table.tex` | `3a-test_var.Rmd` | Johansen cointegration test (trace) |
+| **Table S20** | `diagnostics_table.tex` | `3a-test_var.Rmd` | Diagnostics of VAR models with different lag orders |
+| **Table S21** | `var_summary_table.tex` | `3a-test_var.Rmd` | Summary of the VAR in levels (lag order 3) |
+| **Table S22** | `granger_table.tex` | `3a-test_var.Rmd` | Granger causality tests |
+| **Table S23** | `shock_table.tex` | `3a-test_var.Rmd` | Shock sizes used for the impulse response functions |
+| **Table S24** | `fevd_table.tex` | `3a-test_var.Rmd` | Forecast error variance decomposition |
+| **Table S25** | `var_robustness_table.tex` | `3a-test_var.Rmd` | Robustness checks of the VAR |
+
+Some scripts write further figures that are not in the paper (e.g. `desc_plot.pdf`, `supersharers_cdf.pdf`, `windows_caterpillar_combined.pdf`). Variant runs add a `_<lang>`, `_activity` or `_disgust` suffix to the file names.

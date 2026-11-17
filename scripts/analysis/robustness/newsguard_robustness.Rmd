@@ -1,0 +1,347 @@
+<!--
+Task:   Share of untrustworthy links whose domains fail NewsGuard's false-content criterion, and
+        sensitivity of the news shares to the NewsGuard cutoff.
+Input:  data/newsguard/newsguard_twice_month.csv (licensed, not released)
+        data/Austria-Panel-Untrustworthy-Totals.csv, data/Austria-Panel-Untrustworthy-Links.csv (not released)
+        data/Austria-Panel-Daily-Thresholds.csv
+Output: output/figures/ng_thresholds.pdf
+Run:    Rscript -e 'rmarkdown::render("newsguard_robustness.Rmd")'
+-->
+
+# NewsGuard robustness checks
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=999)
+
+rm(list = ls())
+```
+
+```{r load packages}
+packages <- c(
+  "tidyverse",
+  "dplyr",
+  "kableExtra",
+  "patchwork",
+  "lubridate"
+)
+
+for (p in packages) {
+  if (!require(p, character.only = TRUE)) {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+```
+
+```{r}
+src <- "../../../data"
+dst <- "../../../output"
+dir.create(file.path(dst, "figures"), recursive = TRUE, showWarnings = FALSE)
+```
+
+## NewsGuard ratings with the false-content criterion
+
+Mirrors `scripts/inference/trustworthiness/6-create_newsguard_set.ipynb`, but keeps
+the criterion that the notebook drops. The criterion was renamed in December 2023
+("... false or egregiously misleading content"), so both names are matched.
+
+```{r load newsguard}
+ng_raw <- read_csv(file.path(src, "newsguard", "newsguard_twice_month.csv"),
+                   guess_max = 100000,
+                   show_col_types = FALSE)
+names(ng_raw) <- str_trim(names(ng_raw))
+
+crit_cols <- grep("Does not repeatedly publish false", names(ng_raw),
+                  value = TRUE)
+print(crit_cols)  # check: should be one or two columns
+stopifnot(length(crit_cols) >= 1)
+
+# check the coding of the criterion before recoding
+ng_raw %>%
+  select(all_of(crit_cols)) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(everything()) %>%
+  count(name, value)
+```
+
+```{r prepare newsguard}
+recode_yes_no <- function(x) {
+  x <- str_to_lower(str_trim(as.character(x)))
+  case_when(
+    x %in% c("yes", "y", "true", "1") ~ TRUE,
+    x %in% c("no", "n", "false", "0") ~ FALSE,
+    TRUE ~ NA
+  )
+}
+
+ng <- ng_raw %>%
+  mutate(across(all_of(crit_cols), as.character)) %>%
+  mutate(false_content_raw = coalesce(!!!syms(crit_cols))) %>%
+  transmute(
+    Domain,
+    Country,
+    Score,
+    # same month assignment as 6-create_newsguard_set.ipynb (file_date -> month)
+    file_month = format(as.Date(substr(as.character(file_date), 1, 10)),
+                        "%Y-%m"),
+    passes_false_content = recode_yes_no(false_content_raw)
+  ) %>%
+  # same de-duplication as 6-create_newsguard_set.ipynb: one rating per domain and month
+  arrange(Domain, file_month, Score) %>%
+  distinct(Domain, file_month, .keep_all = TRUE)
+
+# coverage of the criterion
+ng %>%
+  summarise(
+    n_domain_months = n(),
+    share_missing_criterion = mean(is.na(passes_false_content))
+  )
+```
+
+As in `scripts/inference/trustworthiness/8-match_rating.py`, ratings from 2021 onwards are matched by domain and
+month. Earlier tweets are matched by domain only, averaging across all months.
+For the criterion, a domain counts as failing in that earlier period if it
+failed in at least half of the rated months.
+
+```{r ratings for matching}
+stable <- ng %>% filter(file_month >= "2021-01")
+
+ratings_month <- stable %>%
+  select(Domain, file_month,
+         ng_score = Score,
+         passes_false_content)
+
+ratings_domain <- stable %>%
+  group_by(Domain) %>%
+  summarise(
+    ng_score = mean(Score, na.rm = TRUE),
+    fail_rate = mean(!passes_false_content, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(passes_false_content = case_when(
+    is.nan(fail_rate) ~ NA,
+    fail_rate >= 0.5 ~ FALSE,
+    TRUE ~ TRUE
+  )) %>%
+  select(-fail_rate)
+```
+
+## Match to untrustworthy links
+
+```{r load links}
+totals <- read_csv(file.path(src, "Austria-Panel-Untrustworthy-Totals.csv"),
+                   show_col_types = FALSE)
+totals
+
+links <- read_csv(file.path(src, "Austria-Panel-Untrustworthy-Links.csv"),
+                  col_types = cols(id = "c", author_id = "c"))
+
+nrow(links)
+links <- links %>% distinct(id, ng_domain, .keep_all = TRUE)
+nrow(links)
+links %>% count(year = substr(month, 1, 4))
+
+first_month <- min(stable$file_month)
+
+links_rated <- bind_rows(
+  links %>%
+    filter(month >= first_month) %>%
+    left_join(ratings_month,
+              by = c("ng_domain" = "Domain", "month" = "file_month")),
+  links %>%
+    filter(month < first_month) %>%
+    left_join(ratings_domain, by = c("ng_domain" = "Domain"))
+)
+
+# matching check: share of links without a rating or criterion
+links_rated %>%
+  summarise(
+    n_links = n(),
+    share_no_rating = mean(is.na(ng_score)),
+    share_no_criterion = mean(is.na(passes_false_content))
+  )
+```
+
+## Results
+
+Two definitions:
+
+- **Link level:** tweet-domain pairs where the domain itself scores < 60.
+  This is the cleanest measure.
+- **Tweet level:** tweets counted as untrustworthy in the daily measure
+  (tweet Score < 60; for multi-domain tweets, the mean score). A tweet counts
+  as failing if at least one of its domains fails the criterion.
+
+```{r share failing}
+# (a) link level, untrustworthy domains only
+link_level <- links_rated %>%
+  filter(ng_score < 60, !is.na(passes_false_content)) %>%
+  summarise(
+    n_links = n(),
+    share_failing = mean(!passes_false_content)
+  )
+link_level
+
+# (b) tweet level, same definition as the daily measure
+tweet_level <- links_rated %>%
+  group_by(id) %>%
+  summarise(
+    any_fail = any(passes_false_content == FALSE, na.rm = TRUE),
+    all_missing = all(is.na(passes_false_content)),
+    .groups = "drop"
+  ) %>%
+  filter(!all_missing) %>%
+  summarise(
+    n_tweets = n(),
+    share_failing = mean(any_fail)
+  )
+tweet_level
+
+# (c) distinct domains: share of untrustworthy domains failing
+#     (a domain fails if it failed in at least half of its shares)
+domain_level <- links_rated %>%
+  filter(ng_score < 60, !is.na(passes_false_content)) %>%
+  group_by(ng_domain) %>%
+  summarise(fails = mean(!passes_false_content) >= 0.5,
+            .groups = "drop") %>%
+  summarise(
+    n_domains = n(),
+    share_failing = mean(fails)
+  )
+domain_level
+```
+
+Robustness by year: the share of failing domains should not hinge on a single
+period, e.g. the 2022 structural breaks.
+
+```{r by year}
+links_rated %>%
+  filter(ng_score < 60, !is.na(passes_false_content)) %>%
+  mutate(year = substr(month, 1, 4)) %>%
+  group_by(year) %>%
+  summarise(
+    n_links = n(),
+    share_failing = mean(!passes_false_content),
+    .groups = "drop"
+  )
+```
+
+Text for the Methods section and the response letter:
+
+```{r report}
+cat(sprintf(
+  "%.1f%% of all links to untrustworthy sources (n = %s) pointed to domains failing the false-content criterion (%.1f%% of untrustworthy tweets; %.1f%% of %s distinct untrustworthy domains).",
+  100 * link_level$share_failing,
+  format(link_level$n_links, big.mark = ","),
+  100 * tweet_level$share_failing,
+  100 * domain_level$share_failing,
+  domain_level$n_domains
+))
+```
+
+## Sensitivity of the trustworthiness threshold
+
+Reviewer 3 (comment 9) asks about the NewsGuard cutoff of 60. We compare the weekly share of
+untrustworthy and trustworthy news across cutoffs of 40, 50, 60 (main
+analysis) and 70. Untrustworthy = tweet-level Score below the cutoff
+(mean score for tweets linking to several domains, as in the main measure).
+
+Run `python scripts/analysis/1b-aggregate_thresholds.py <DATA_DIR>` first.
+
+```{r thresholds data}
+cutoffs <- c(40, 50, 60)
+
+daily <- read_csv(file.path(src, "Austria-Panel-Daily-Thresholds.csv"),
+                  show_col_types = FALSE) %>%
+  mutate(day = as.Date(day)) %>%
+  arrange(day)
+
+# trustworthy = rated and at or above the cutoff
+for (k in cutoffs) {
+  daily[[paste0("T_", k)]] <- daily$n_rated - daily[[paste0("N_", k)]]
+}
+
+# check: N_60 should match the main measure (count_max_caution + count_caution)
+summary(daily$N_60 / daily$tweet_count * 100)
+
+# weekly shares of all tweets (%), as in the main measure
+weekly <- daily %>%
+  mutate(week = floor_date(day, "week", week_start = 1)) %>%
+  group_by(week) %>%
+  summarise(across(c(tweet_count, starts_with("N_", ignore.case = FALSE), starts_with("T_", ignore.case = FALSE)),
+                   sum, na.rm = TRUE),
+            .groups = "drop") %>%
+  # drop incomplete first and last week
+  slice(2:(n() - 1)) %>%
+  pivot_longer(c(starts_with("N_", ignore.case = FALSE), starts_with("T_", ignore.case = FALSE)),
+               names_to = c("type", "cutoff"), names_sep = "_",
+               values_to = "count") %>%
+  mutate(
+    share = count / tweet_count * 100,
+    type = recode(type, N = "Untrustworthy", T = "Trustworthy"),
+    cutoff = factor(cutoff, levels = as.character(cutoffs))
+  )
+```
+
+```{r thresholds plot, fig.width=6.5, fig.height=4.5}
+cutoff_labels <- c("40" = "< 40", "50" = "< 50",
+                   "60" = "< 60 (main)")
+
+threshold_plot <- function(t, main_colour) {
+  ggplot(weekly %>% filter(type == t, !is.na(cutoff)),
+       aes(x = week, y = share, colour = cutoff, linewidth = cutoff)) +
+    geom_line() +
+    scale_colour_manual(
+      values = c("40" = "grey75", "50" = "grey55",
+                 "60" = main_colour),
+      labels = cutoff_labels, name = "Untrustworthy\nif score") +
+    scale_linewidth_manual(
+      values = c("40" = 0.4, "50" = 0.4, "60" = 0.9),
+      labels = cutoff_labels, name = "Untrustworthy\nif score") +
+    scale_x_date(date_breaks = "1 year", date_labels = "%b %Y",
+             expand = expansion(mult = 0.01))+ 
+    scale_y_continuous(limits = c(0, NA)) +
+    labs(x = NULL, y = paste0(tolower(t), " news\n(% of tweets)")) +
+    theme_classic() +
+    theme(axis.text = element_text(size = 9),
+          axis.title = element_text(size = 10),
+          legend.position = "right",
+          legend.title = element_text(size = 9),
+          legend.text = element_text(size = 9),
+          legend.key.width = unit(0.8, "cm"),
+          plot.tag = element_text(face = "bold"))
+}
+
+p_n <- threshold_plot("Untrustworthy", "#7570b3") + labs(tag = "a")
+p_t <- threshold_plot("Trustworthy", "#1b9e77") +
+  labs(tag = "b", x = "Time (weeks)")
+
+p_thresholds <- (p_n / p_t) +
+  plot_layout(guides = "collect") &
+  theme(plot.tag = element_text(face = "bold"))
+
+p_thresholds
+
+ggsave(file.path(dst, "figures", "ng_thresholds.pdf"),
+       p_thresholds, width = 6.5, height = 4.5)
+```
+
+How similar are the daily untrustworthy series across cutoffs? High
+correlations mean the temporal dynamics (the input to the VAR) barely
+depend on the cutoff.
+
+```{r thresholds correlation}
+daily %>%
+  transmute(across(starts_with("N_", ignore.case = FALSE), ~ .x / tweet_count)) %>%
+  rename_with(~ sub("N_", "N < ", .x)) %>%
+  cor(use = "pairwise.complete.obs") %>%
+  round(3)
+
+# mean daily share (%) per cutoff, for the text
+daily %>%
+  summarise(across(starts_with("N_", ignore.case = FALSE),
+                   ~ mean(.x / tweet_count * 100, na.rm = TRUE))) %>%
+  round(3)
+```
+

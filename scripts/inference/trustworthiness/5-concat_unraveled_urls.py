@@ -1,8 +1,7 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Concatenate per-batch unraveled URL files into a single file.
-# Input:  <SRC_DIR>/unraveled_*.csv.gz  (output of 2_unravel_urls.py)
-# Output: <DST>  (path provided as second argument)
-# Usage:  python 5-concat_unraveled_urls.py <SRC_DIR> <DST>
+# Task:   Concatenate the per-batch expanded URL files and extract their domains.
+# Input:  <SRC_DIR>/unraveled_*.csv.gz (from 3-unravel_urls.py)
+# Output: <DST_DIR>/unraveled_domains_reduc.csv.gz
+# Run:    python 5-concat_unraveled_urls.py <SRC_DIR> <DST_DIR>
 
 import pandas as pd
 import numpy as np

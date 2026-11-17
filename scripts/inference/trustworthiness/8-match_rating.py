@@ -1,15 +1,10 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Match NewsGuard domain ratings to tweets by domain and month to produce
-#         the central analysis-ready file used by all downstream analysis scripts.
-#         Ratings from 2021+ matched on (domain, month); earlier tweets on domain only.
-#         Duplicate domain rows aggregated: Score averaged, Orientation joined.
-# Input:  <DATA_DIR>/Austria-Panel-Tweets.csv.gz
-#         <DATA_DIR>/urls/matched_domains_all.csv.gz   (output of 7-match_domains.py)
-#         <DATA_DIR>/dtypes.pkl
-#         <DATA_DIR>/newsguard/domains_unique.csv                  (proprietary — do not release)
-# Output: <DATA_DIR>/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz
-#         Columns added: ng_domain, Score (0–100), Orientation
-# Usage:  python 8-match_rating.py <DATA_DIR>
+# Task:   Attach the NewsGuard score and orientation to each tweet (by domain and month).
+# Input:  data/Austria-Panel-Tweets.csv.gz (not released)
+#         data/urls/matched_domains_all.csv.gz (not released)
+#         data/newsguard/domains_unique.csv (licensed, not released)
+#         data/dtypes.pkl
+# Output: data/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz (not released)
+# Run:    python 8-match_rating.py ../../../data
 
 import pandas as pd
 from os.path import join
@@ -17,7 +12,7 @@ import pickle as pkl
 from tqdm import tqdm
 import sys
 
-src = sys.argv[1] # /misinfo-panel-austria/data/
+src = sys.argv[1] # <DATA_DIR>
 file = "Austria-Panel-Tweets.csv.gz"
 chunk_size = 10_000_000
 n_chunks = None  # unknown without decompressing; tqdm shows count only

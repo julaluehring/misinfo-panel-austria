@@ -1,232 +1,171 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   For each user, extract tweet windows before and after news-sharing events
-#         (NewsGuard-rated domains) to study emotional reactions. Only windows with
-#         >= 10 tweets in both before and after periods are retained.
-#         Window output stores emotion lists as space-separated strings.
-# Input:  <DATA_DIR>/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz
-#         <DATA_DIR>/emotions/emotion_inference.csv.gz
-#         <DATA_DIR>/authors_filtered.csv
-# Output: <DATA_DIR>/Austria-Panel-Windows-{WINDOW_HOURS}h-10min.csv.gz
-# Usage:  python 7-aggregate_windows.py <DATA_DIR> <WINDOW_HOURS>
-
+# Task:   For each news-sharing event, summarise the user's tweets in the hours before and after.
+# Input:  data/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz (not released)
+#         data/emotions/emotion_inference.csv.gz (not released)
+#         data/authors_filtered.csv
+# Output: data/Austria-Panel-Windows-<hours>h-10min-<lang>.csv.gz
+# Run:    python 7-aggregate_windows.py ../../data <hours> [lang] [n_test_users]   # hours: 1 or 24; lang: de_en (default), de, all
 import polars as pl
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+import numpy as np
 import pandas as pd
-import sys
-from os.path import join, exists 
-import os
 import gzip
 import shutil
+import os
+from os.path import join, exists
+import sys
 from tqdm import tqdm
 
 src = sys.argv[1]
 WINDOW_HOURS = int(sys.argv[2])
-output_file = join(src, "Austria-Panel-Tweets-Windows-" + str(WINDOW_HOURS) + "h-10min.csv")
-n_users = int(sys.argv[3]) if len(sys.argv) > 4 else None # test mode
+LANG = sys.argv[3] if len(sys.argv) > 3 else "de_en"
+LANG_SETS = {"de_en": ["de", "en"], "de": ["de"], "all": None}
+assert LANG in LANG_SETS, f"lang must be one of {list(LANG_SETS)}"
+output_file = join(src, f"Austria-Panel-Windows-{WINDOW_HOURS}h-10min-{LANG}.csv")
+n_users = int(sys.argv[4]) if len(sys.argv) > 4 else None  # test mode
+EMOTIONS = ["anger", "fear", "disgust"]
+MIN_TWEETS_MEAN = 10
+CHUNK = 200_000  # events per output chunk
 
-''' STEP 1: Load user list '''
+# results are appended chunk by chunk, so never start on top of an old run
+if exists(output_file) or exists(output_file + ".gz"):
+    sys.exit(f"{output_file}(.gz) already exists; delete it before running.")
+print(f"Language set: {LANG}, window: {WINDOW_HOURS}h")
+
+''' STEP 1: Load users and all their tweets (once) '''
 ids = pd.read_csv(join(src, "authors_filtered.csv"), usecols=["author_id"])
-user_ids = ids["author_id"].astype(int).tolist()  # convert to list, not set
-
-# take a random sample of ids
+user_ids = ids["author_id"].astype(int).tolist()
 if n_users is not None:
-    user_ids = pd.Series(user_ids)\
-                    .sample(n=n_users, random_state=63)\
-                    .tolist()
-
+    user_ids = pd.Series(user_ids).sample(n=n_users, random_state=63).tolist()
 print(f"Processing {len(user_ids):,} users")
 
-USER_BATCH_SIZE = 1000  
-
-''' STEP 2: Process users in batches '''
-for batch_idx in tqdm(range(0, len(user_ids), USER_BATCH_SIZE), 
-                      desc="User batches",
-                      total=(len(user_ids) + USER_BATCH_SIZE - 1) // USER_BATCH_SIZE):
-    
-    batch_users = user_ids[batch_idx:batch_idx + USER_BATCH_SIZE]
-    
-    # Load ONLY this batch of users
-    print(f"\nBatch {batch_idx // USER_BATCH_SIZE + 1}: Loading {len(batch_users)} users...")
-    
-    tweets = (
-        pl.scan_csv(
-            join(src, "Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz"),
-            low_memory=True
-        )
-        .filter(pl.col("author_id").is_in(batch_users))
-        .select(["author_id", "id", "created_at", "Score"])
-        .with_columns([
-            pl.col("id").cast(pl.Utf8),
-            pl.col("created_at").str.to_datetime(time_zone="UTC")
-        ])
-        .filter(
-            (pl.col("created_at") >= pl.datetime(2019, 1, 1, time_zone="UTC")) &
-            (pl.col("created_at") < pl.datetime(2023, 4, 1, time_zone="UTC"))
-        )
-    )
-    
-    emotion_scores = (
-        pl.scan_csv(join(src, "./emotions/emotion_inference.csv.gz"))
-        .select(["id", "anger_v2", "fear_v2"])
-        .with_columns([
-            pl.col("id").cast(pl.Utf8),
-            pl.col("anger_v2").cast(pl.Float64),
-            pl.col("fear_v2").cast(pl.Float64)
-        ])
-    )
-    
-    tweets_with_emotions = (
-        tweets
-        .join(emotion_scores, on="id", how="left")
+tweets = (
+    pl.scan_csv(join(src, "Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz"),
+                low_memory=True, schema_overrides={"lang": pl.Utf8})
+    .filter(pl.col("author_id").is_in(user_ids))
+    .select(["author_id", "id", "created_at", "lang", "Score"])
+    .with_columns(pl.col("created_at").str.to_datetime(time_zone="UTC"))
+    .filter((pl.col("created_at") >= pl.datetime(2019, 1, 1, time_zone="UTC")) &
+            (pl.col("created_at") < pl.datetime(2023, 4, 1, time_zone="UTC")))
+)
+emotion_scores = (
+    pl.scan_csv(join(src, "./emotions/emotion_inference.csv.gz"))
+    .select(["id"] + [f"{e}_v2" for e in EMOTIONS])
+    .with_columns([pl.col("id").cast(pl.Int64)] +
+                  [pl.col(f"{e}_v2").cast(pl.Float64) for e in EMOTIONS])
+)
+tw = tweets.join(emotion_scores, on="id", how="left")
+if LANG_SETS[LANG] is not None:
+    in_lang = pl.col("lang").is_in(LANG_SETS[LANG]).fill_null(False)
+    tw = tw.with_columns([pl.when(in_lang).then(pl.col(f"{e}_v2")).otherwise(None)
+                          .alias(f"{e}_v2") for e in EMOTIONS])
+print("Loading tweets...")
+tw = (tw.drop("lang")
         .collect(streaming=True)
-        .sort(["author_id", "created_at"])
-    )
-    
-    # get news events for this batch
-    news_tweets = (
-        tweets_with_emotions
+        .sort(["author_id", "created_at"], maintain_order=True))
+print(f"  {tw.height:,} tweets")
+
+''' STEP 2: Sort key (user, time) and cumulative sums '''
+# key = user index * 2^47 + microseconds since 2019-01-01 (fits in int64)
+tw = tw.with_columns(
+    pl.col("author_id").rank("dense").cast(pl.Int64).alias("uidx"),
+    (pl.col("created_at") - pl.datetime(2019, 1, 1, time_zone="UTC"))
+        .dt.total_microseconds().alias("t_us"))
+assert tw["t_us"].max() < 2 ** 47 and tw["uidx"].max() < 2 ** 15
+key = (tw["uidx"].to_numpy() << 47) + tw["t_us"].to_numpy()
+assert np.all(np.diff(key) >= 0)
+
+vals, ok, csum, ccnt = {}, {}, {}, {}
+for e in EMOTIONS:
+    v = tw[f"{e}_v2"].to_numpy(allow_copy=True).astype(float)  # nulls -> nan
+    ok[e] = ~np.isnan(v)
+    vals[e] = v
+    ccnt[e] = np.concatenate([[0], np.cumsum(ok[e])])
+
+''' STEP 3: Events and windows '''
+ev = (tw.with_row_index("pos")
         .filter(pl.col("Score").is_not_null())
-        .unique(subset=["id"])
-        .select([
-            "id", "author_id", "created_at", "Score",
-            "anger_v2", "fear_v2"
-        ])
-        .rename({
-            "id": "event_id",
-            "created_at": "event_timestamp",
-            "Score": "event_score"
-        })
-    )
-    
-    if len(news_tweets) == 0:
-        print("  No news events in this batch, skipping...")
-        continue
-    
-    print(f"  Processing {len(news_tweets):,} events...")
-    
-    # Partition by user
-    user_groups = tweets_with_emotions.partition_by("author_id", as_dict=True)
-    user_events = news_tweets.partition_by("author_id", as_dict=True)
-    
-    results_list = []
-    
-    for author_id_tuple in user_events.keys():
-        
-        #check if exists in both dicts
-        if author_id_tuple not in user_groups:
-            continue
-        
-        user_tweets = user_groups[author_id_tuple]
-        user_news = user_events[author_id_tuple]
+        .unique(subset=["id"], keep="first", maintain_order=True))
+print(f"  {ev.height:,} news events")
+ek = key[ev["pos"].to_numpy()]
+W = WINDOW_HOURS * 3600 * 10 ** 6
+b_lo = np.searchsorted(key, ek - W, side="left")   # created_at >= t - h
+b_hi = np.searchsorted(key, ek, side="left")       # created_at <  t
+a_lo = np.searchsorted(key, ek, side="right")      # created_at >  t
+a_hi = np.searchsorted(key, ek + W, side="right")  # created_at <= t + h
 
-        author_id = author_id_tuple[0] # get integer
-        
-        # Process each news event
-        for event_row in user_news.iter_rows(named=True):
-            event_id = event_row["event_id"]
-            event_time = event_row["event_timestamp"]
-            event_score = event_row["event_score"]
-            
-            # Define window
-            window_start = event_time - pl.duration(hours=WINDOW_HOURS)
-            window_end = event_time + pl.duration(hours=WINDOW_HOURS)
-            
-            # Filter tweets in window
-            window_tweets = user_tweets.filter(
-                (pl.col("created_at") >= window_start) &
-                (pl.col("created_at") <= window_end) &
-                (pl.col("id") != event_id)
-            )
-            
-            if len(window_tweets) == 0:
-                continue
-            
-            # split into before/after
-            before_tweets = window_tweets.filter(pl.col("created_at") < event_time)
-            after_tweets = window_tweets.filter(pl.col("created_at") > event_time)
-            
-            # process the emotion scores
-            def process_emotions(df):
-                
-                n_tweets = len(df)
-                if n_tweets == 0:
-                    return None
 
-                # create lists of emotion scores
-                anger_list = df["anger_v2"].drop_nulls().to_list()
-                fear_list = df["fear_v2"].drop_nulls().to_list()
+def window_stats(lo, hi, side):
+    out = {f"n_tweets_{side}": hi - lo}
+    for e in EMOTIONS:
+        out[f"n_{e}_{side}"] = ccnt[e][hi] - ccnt[e][lo]
+    return out
 
-                # check if valid scores 
-                if len(anger_list) == 0 or len(fear_list) == 0:
-                    return None
 
-                # only calculate mean if enough tweets
-                mean_anger = df["anger_v2"].mean() if len(anger_list) >= 10 else float('nan')
+bs, as_ = window_stats(b_lo, b_hi, "before"), window_stats(a_lo, a_hi, "after")
+keep = np.ones(ev.height, dtype=bool)
+for st in (bs, as_):
+    for e in EMOTIONS:
+        keep &= st[f"n_{e}_{'before' if st is bs else 'after'}"] > 0
+print(f"  {keep.sum():,} events with classified tweets before and after")
 
-                mean_fear = df["fear_v2"].mean() if len(fear_list) >= 10 else float('nan')
 
-                return {
-                    "n_tweets": n_tweets,
-                    "n_anger": len(anger_list), 
-                    "n_fear": len(fear_list),
-                    "anger_list": anger_list,
-                    "fear_list": fear_list,
-                    "mean_anger": mean_anger,
-                    "mean_fear": mean_fear
-                }
-            
-            before_stats = process_emotions(before_tweets)
-            after_stats = process_emotions(after_tweets)
+def mean_and_list(e, lo, hi):
+    v = vals[e][lo:hi]
+    v = v[~np.isnan(v)]
+    m = float(v.mean()) if len(v) >= MIN_TWEETS_MEAN else float("nan")
+    return m, " ".join(map(str, v.tolist()))
 
-            # only keep if one windows has anger or fear
-            if before_stats and after_stats:
-                results_list.append({
-                    "event_id": event_id,
-                    "author_id": author_id,
-                    "event_timestamp": event_time,
-                    "event_score": event_score,
-                    "n_tweets_before": before_stats["n_tweets"],
-                    "n_anger_before": before_stats["n_anger"],
-                    "n_fear_before": before_stats["n_fear"],
-                    "anger_before_list": " ".join(map(str, before_stats["anger_list"])),  
-                    "fear_before_list": " ".join(map(str, before_stats["fear_list"])), 
-                    "mean_anger_before": before_stats["mean_anger"],
-                    "mean_fear_before": before_stats["mean_fear"],
-                    "n_tweets_after": after_stats["n_tweets"],
-                    "n_anger_after": after_stats["n_anger"],
-                    "n_fear_after": after_stats["n_fear"],
-                    "anger_after_list": " ".join(map(str, after_stats["anger_list"])),
-                    "fear_after_list": " ".join(map(str, after_stats["fear_list"])),
-                    "mean_anger_after": after_stats["mean_anger"],
-                    "mean_fear_after": after_stats["mean_fear"],
-                    "event_anger": event_row.get("anger_v2"),
-                    "event_fear": event_row.get("fear_v2"),
-                })
-    
-    
-    # how many results to write???
-    print(f"  Preparing to write {len(results_list):,} results...")
 
-    if results_list:
-        df_batch = pl.DataFrame(results_list, infer_schema_length=None)
-        
-        if not exists(output_file):  
-            df_batch.write_csv(output_file)
-            print(f"  Wrote {len(df_batch):,} rows (new file)")
-        else:
-            with open(output_file, 'ab') as f:
-                df_batch.write_csv(f, include_header=False)
-            print(f"  Appended {len(df_batch):,} rows")
-    
-    # Free memory before next batch
-    del tweets_with_emotions, news_tweets, user_groups, user_events, results_list
+''' STEP 4: Assemble and write in chunks '''
+idx = np.flatnonzero(keep)
+ev_kept = ev[idx]
+for start in tqdm(range(0, len(idx), CHUNK), desc="Writing chunks"):
+    sl = slice(start, start + CHUNK)
+    ii = idx[sl]
+    e_df = ev_kept[sl]
+    cols = {
+        "event_id": e_df["id"],
+        "author_id": e_df["author_id"],
+        "event_timestamp": e_df["created_at"],
+        "event_score": e_df["Score"],
+    }
+    lists = {}
+    for side, lo_arr, hi_arr in (("before", b_lo, b_hi), ("after", a_lo, a_hi)):
+        st = bs if side == "before" else as_
+        cols[f"n_tweets_{side}"] = st[f"n_tweets_{side}"][ii]
+        for e in EMOTIONS:
+            ml = [mean_and_list(e, lo, hi) for lo, hi in zip(lo_arr[ii], hi_arr[ii])]
+            lists[(e, side)] = ml
+    # same column order as the loop version
+    order = []
+    for side in ("before", "after"):
+        st = bs if side == "before" else as_
+        cols[f"n_anger_{side}"] = st[f"n_anger_{side}"][ii]
+        cols[f"n_fear_{side}"] = st[f"n_fear_{side}"][ii]
+        cols[f"anger_{side}_list"] = [x[1] for x in lists[("anger", side)]]
+        cols[f"fear_{side}_list"] = [x[1] for x in lists[("fear", side)]]
+        cols[f"mean_anger_{side}"] = [x[0] for x in lists[("anger", side)]]
+        cols[f"mean_fear_{side}"] = [x[0] for x in lists[("fear", side)]]
+        cols[f"n_disgust_{side}"] = st[f"n_disgust_{side}"][ii]
+        cols[f"disgust_{side}_list"] = [x[1] for x in lists[("disgust", side)]]
+        cols[f"mean_disgust_{side}"] = [x[0] for x in lists[("disgust", side)]]
+        order += [f"n_tweets_{side}", f"n_anger_{side}", f"n_fear_{side}",
+                  f"anger_{side}_list", f"fear_{side}_list",
+                  f"mean_anger_{side}", f"mean_fear_{side}",
+                  f"n_disgust_{side}", f"disgust_{side}_list", f"mean_disgust_{side}"]
+    for e in EMOTIONS:
+        cols[f"event_{e}"] = e_df[f"{e}_v2"]
+    df_chunk = pl.DataFrame(cols).select(
+        ["event_id", "author_id", "event_timestamp", "event_score"] + order +
+        [f"event_{e}" for e in EMOTIONS])
+    if start == 0:
+        df_chunk.write_csv(output_file)
+    else:
+        with open(output_file, "ab") as f:
+            df_chunk.write_csv(f, include_header=False)
 
-''' STEP 3: Compress '''
+''' STEP 5: Compress '''
 print("\nCompressing final results...")
-with open(output_file, 'rb') as f_in:
-    with gzip.open(output_file + '.gz', 'wb') as f_out:
-        shutil.copyfileobj(f_in, f_out)
+with open(output_file, "rb") as f_in, gzip.open(output_file + ".gz", "wb") as f_out:
+    shutil.copyfileobj(f_in, f_out)
 os.remove(output_file)
-
 print("Done!")

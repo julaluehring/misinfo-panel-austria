@@ -1,9 +1,7 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Clean raw tweet text for emotion inference: remove emojis, URLs, @-mentions,
-#         line breaks; exclude retweets (RT prefix), non-strings, and empty strings.
-# Input:  <DATA_DIR>/Austria-Panel-Tweets.csv.gz  (columns used: id, text)
-# Output: <DATA_DIR>/emotions/Austria-Panel-Text.csv.gz  (columns: id, text_cleaned)
-# Usage:  python 1-prepare_text.py <DATA_DIR>
+# Task:   Clean tweet text for emotion classification (remove emojis, URLs, mentions, retweets).
+# Input:  data/Austria-Panel-Tweets.csv.gz (not released)
+# Output: data/emotions/Austria-Panel-Text.csv.gz (not released)
+# Run:    python 1-prepare_text.py ../../../data
 
 import os
 import pandas as pd
@@ -16,7 +14,7 @@ import gzip
 # suppress copy warning
 pd.options.mode.chained_assignment = None
 
-src = sys.argv[1] # /misinfo-panel-austria/data/
+src = sys.argv[1] # <DATA_DIR>
 
 file = join(src, "Austria-Panel-Tweets.csv.gz")
 out_file = join(src, "emotions", "Austria-Panel-Text.csv.gz")

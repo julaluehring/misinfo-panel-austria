@@ -1,12 +1,11 @@
 #!/bin/bash
-# ===== SCRIPT OVERVIEW =====
-# Task:   Extract tweet-level fields from gzipped Brandwatch JSON exports to per-file CSVs using jq.
-# Input:  *.json.gz
-# Output: /*.csv.gz is one file per JSON input with columns: id, conversation_id, text, lang, created_at, author_id, retweet_count, reply_count, quote_count, like_count, impression_count, urls, expanded_urls, hashtags, mentions, tweet_type, retweeted_id, quoted_id, in_reply_to_user_id
-# Usage:  bash 1-extract_tweet_data.sh
+# Task:   Extract tweet fields from the Brandwatch JSON exports with jq, one CSV per input file.
+# Input:  data/JSONfiles/*.json.gz (not released)
+# Output: data/CSVtweets/*.csv.gz
+# Run:    bash 1-extract_tweet_data.sh
 
-input_dir="/misinfo-panel-austria/data/JSONfiles"
-output_dir="/misinfo-panel-austria/data/CSVtweets"
+input_dir="../../data/JSONfiles"
+output_dir="../../data/CSVtweets"
 
 for input_file in "$input_dir"/*.json.gz; do
 

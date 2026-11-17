@@ -1,18 +1,23 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Visualise event window results and compare LMER model coefficients.
-#         Shows emotion distributions before/after news events; caterpillar plots;
-#         supersharer CDF and individual-level trajectories.
-# Input:  data/Austria-Panel-Windows-1h-10min.csv.gz
-#         data/Austria-Panel-Windows-24h-10min.csv.gz
-#         data/windows_10_1h/*.csv   (output of 8-boot_window_models.R)
-#         data/windows_10_24h/*.csv
-# Output: output/window_tweet_distributions.pdf
-#         output/boot_means_comparison.pdf
-#         output/emotions_models_compared.pdf
-#         output/windows_emotions_coefs.pdf
-#         output/windows_caterpillar_combined.pdf
-#         output/individual_plot.pdf
+---
+title: "9 - Analyze windows"
+params:
+  lang: "de_en"      # de_en (main), de (SI)
+  disgust: false     # false (main), true (robustness check for the response letter)
+---
 
+<!--
+Task:   Event window results: emotions before and after news sharing, model comparisons, and the
+        combined Fig. 1.
+Input:  data/Austria-Panel-Windows-{1h,24h}-10min-<lang>.csv.gz, data/Austria-Panel-Users-Daily.csv.gz
+        data/Austria-Panel-Supersharers.csv (from 11-analyze_supersharers.Rmd)
+        scripts/analysis/windows_models/ (from 8-boot_window_models.R)
+        output/users/user_models_tweet_boot_<lang>.rds (from 5-boot_features_models.R)
+Output: output/figures/individual_plot.pdf (Fig. 1), windows_emotions_coefs.pdf, emotions_models_compared.pdf,
+        boot_means_comparison.pdf, window_tweet_distributions.pdf, windows_caterpillar_combined.pdf
+        output/tables/emotions_{before,after,change}.tex, windows_random_effects.tex
+        scripts/analysis/windows/*.png
+Run:     As R Markdown or in terminal as Rscript -e 'rmarkdown::render("9-analyze_windows.Rmd")'   # variants: params = list(lang = "de", disgust = TRUE)
+-->
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, 
@@ -21,21 +26,20 @@ knitr::opts_chunk$set(echo = TRUE,
                       dpi=300,
                       fig.width = 6.5,
                       fig.height = 4.5)
-
-set.seed(636)
-````
+```
 
 ```{r libraries}
 library(tidyverse)
 library(ggplot2)
 library(patchwork)
 library(scales)
-library(kable)
 library(kableExtra)
 library(lme4)
 library(performance)
 library(DHARMa)
 library(lmerTest)
+
+set.seed(636)  # for reproducibility
 ```
 
 ```{r fig}
@@ -54,29 +58,50 @@ custom_plot <- function() {
 rating_colors <- c("untrustworthy" = "#8b7ab8", 
                    "trustworthy" = "#2a9d8f")
 emotion_colors <- c("anger" = "#e41a1c", 
-                    "fear" = "#377eb8")
+                    "fear" = "#377eb8",
+                    "disgust" = "#e69f00")
 emotion_colors_caps <- c("Anger" = "#e41a1c", 
-                         "Fear" = "#377eb8")
+                         "Fear" = "#377eb8",
+                         "Disgust" = "#e69f00")
 ```
 
 ```{r paths}
-src        <- "../../data"
-dst        <- "../../output"   # figures and tables
+src <- "../../data"
+dst <- "../../output"   # figures and tables
 models_dir <- "windows_models" # intermediate model objects (relative to scripts/analysis/)
+dir.create(file.path(dst, "figures"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(dst, "tables"), recursive = TRUE, showWarnings = FALSE)
+
+# variant via render(params = list(...)), see the YAML header; defaults = main specification
+LANG     <- params$lang       # de_en (main), de (SI)
+DISGUST  <- params$disgust    # FALSE (main), TRUE (robustness: + disgust; validation failed)
+EMOTIONS <- c("anger", "fear", if (DISGUST) "disgust")
+SIZES    <- c("1h", "24h")
+tag      <- paste0(if (LANG == "de_en") "" else paste0("_", LANG), if (DISGUST) "_disgust" else "")
+# coefficient tables of 8-boot_window_models.R (disgust models in a separate file)
+read_coefs <- function(size) {
+  files <- c("coefs_window_models.csv", if (DISGUST) "coefs_window_models_disgust.csv")
+  map_dfr(files, ~ read_csv(file.path(win_dir(size), .x), show_col_types = FALSE)) %>%
+    filter(emotion %in% EMOTIONS)
+}
+win_dir  <- function(size) file.path(models_dir, paste0("windows_10_", size, "_", LANG))
+dir.create("windows", showWarnings = FALSE)
 ```
 
 ## Data Overview
 
-```{r data}
-short_window <- read_csv(file.path(src, "Austria-Panel-Windows-1h-10min.csv.gz"),
+```{r data-1h}
+short_window <- read_csv(file.path(src, paste0("Austria-Panel-Windows-1h-10min-", LANG, ".csv.gz")),
                         col_types = cols(
                           author_id = col_character(),
                           event_id = col_character(),
                           event_score = col_double(),
                           mean_anger_before = col_double(),
                           mean_fear_before = col_double(),
+                          mean_disgust_before = col_double(),
                           mean_anger_after = col_double(),
-                          mean_fear_after = col_double()
+                          mean_fear_after = col_double(),
+                          mean_disgust_after = col_double()
                         )) %>%
   mutate(
     untrustworthy = (100 - event_score) / 100
@@ -86,16 +111,18 @@ cat("Number of unique users:", n_distinct(short_window$author_id), "\n")
 cat("Number of unique events:", n_distinct(short_window$event_id), "\n")
 ```
 
-```{r data}
-long_window <- read_csv(file.path(src, "Austria-Panel-Windows-24h-10min.csv.gz"),
+```{r data-24h}
+long_window <- read_csv(file.path(src, paste0("Austria-Panel-Windows-24h-10min-", LANG, ".csv.gz")),
                         col_types = cols(
                           author_id = col_character(),
                           event_id = col_character(),
                           event_score = col_double(),
                           mean_anger_before = col_double(),
                           mean_fear_before = col_double(),
+                          mean_disgust_before = col_double(),
                           mean_anger_after = col_double(),
-                          mean_fear_after = col_double()
+                          mean_fear_after = col_double(),
+                          mean_disgust_after = col_double()
                         )) %>%
   mutate(
     untrustworthy = (100 - event_score) / 100
@@ -111,18 +138,16 @@ cat("Number of unique events:", n_distinct(long_window$event_id), "\n")
 prepare_long_shape <- function(data) {
   data %>%
     select(author_id, event_id,
-           mean_anger_before, mean_anger_after,
-           mean_fear_before, mean_fear_after) %>%
+           all_of(paste0("mean_", rep(EMOTIONS, each = 2), c("_before", "_after")))) %>%
     pivot_longer(
-      cols = c(mean_anger_before, mean_anger_after,
-               mean_fear_before, mean_fear_after),
+      cols = starts_with("mean_"),
       names_to = c("emotion", "window"),
       names_pattern = "mean_(.*)_(before|after)",
       values_to = "value"
     ) %>%
     filter(!is.na(value)) %>%  # Remove missing values
     mutate(
-      emotion = factor(emotion, levels = c("anger", "fear")),
+      emotion = factor(emotion, levels = EMOTIONS),
       window = factor(window, levels = c("before", "after"))
     )
 }
@@ -178,11 +203,13 @@ p_1h <- ggplot(window_counts_1h, aes(x = n_tweets)) +
 
 p_combined <- p_1h / p_24h
 
-print(p_combined)
+ggsave(paste0("windows/window_distributions_comparison", tag, ".png"),
+       plot = p_combined,
+       width = 6.5, height = 5.5)
 ```
 
 ```{r}
-ggsave(file.path(dst, "./window_tweet_distributions.pdf"),
+ggsave(file.path(dst, "figures", paste0("window_tweet_distributions", tag, ".pdf")),
        plot = p_combined,
        width = 6.5, height = 5.5)
 ```
@@ -190,6 +217,7 @@ ggsave(file.path(dst, "./window_tweet_distributions.pdf"),
 ## Distribution of emotions before and after events in each window
 ```{r emotions}
 # plot distributions of emotions before and after events for each window
+
 p_emotions_1h <- ggplot(window_short, aes(x = value, fill = emotion)) +
   geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
   facet_wrap(~ window, scales = "free_y") +
@@ -221,15 +249,46 @@ p_emotions_24h <- ggplot(window_long, aes(x = value, fill = emotion)) +
   )
 
 p_emotions_combined <- p_emotions_1h / p_emotions_24h
-
-print(p_emotions_combined)
-```
-
-```{r}
-ggsave(file.path(dst, "window_emotions_comparison.png"),
+ggsave(paste0("windows/window_emotions_comparison", tag, ".png"),
        plot = p_emotions_combined,
        width = 6.5, height = 5.5)
 
+```
+
+```{r}
+# plot as time series 
+p_emotions_time_1h <- ggplot(window_short, aes(x = window, y = value, color = emotion)) +
+  geom_boxplot() +
+  labs(
+    title = "a.",
+    x = "Time window",
+    y = "Emotion score"
+  ) +
+  scale_color_manual(values = emotion_colors) +
+  custom_plot()+
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold")
+  )
+p_emotions_time_24h <- ggplot(window_long, aes(x = window, y = value, color = emotion)) +
+  geom_boxplot() +
+  labs(
+    title = "b.",
+    x = "Time window",
+    y = "Emotion score"
+  ) +
+  scale_color_manual(values = emotion_colors) +
+  custom_plot()+
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold")
+  )
+
+p_emotions_boxplot <- p_emotions_time_1h / p_emotions_time_24h
+
+ggsave(paste0("windows/window_emotions_boxplot", tag, ".png"),
+       plot = p_emotions_boxplot,
+       width = 6.5, height = 5.5)
 ```
 
 ## Sensitivity analysis of emotion means
@@ -238,11 +297,11 @@ ggsave(file.path(dst, "window_emotions_comparison.png"),
 boot_mean_stability <- function(data, list_col, emotion, window) {
 
   # extract lists of values from dump column in df 
-  all_values <- data %>%
-    filter(lengths(.data[[list_col]]) > 0) %>%  
-    select(.data[[list_col]]) %>%
-    unnest(cols = all_of(list_col)) %>%
-    pull() %>%
+  # list columns are stored as space-separated strings (7-aggregate_windows.py)
+  all_values <- data[[list_col]] %>%
+    na.omit() %>%
+    str_split(" ") %>%
+    unlist() %>%
     as.numeric() %>%
     na.omit()
 
@@ -291,53 +350,80 @@ boot_mean_stability <- function(data, list_col, emotion, window) {
 ```
 
 ```{r}
-res_anger_1h <- boot_mean_stability(short_window, "anger_before_list",
-                                         "anger", "a.")
-```
+# rows: window size (a. 1h, b. 24h); columns: emotions
+res_means <- unlist(lapply(SIZES, function(size) {
+  d <- if (size == "1h") short_window else long_window
+  lapply(seq_along(EMOTIONS), function(i)
+    boot_mean_stability(d, paste0(EMOTIONS[i], "_before_list"), EMOTIONS[i],
+                        if (i == 1) paste0(c("1h" = "a.", "24h" = "b.")[[size]]) else ""))
+}), recursive = FALSE)
+p_means_combined <- wrap_plots(res_means, ncol = length(EMOTIONS))
 
-```{r}
-res_fear_1h <- boot_mean_stability(short_window, 
-                                    "fear_before_list", 
-                                    "fear", "")
-```
-
-
-```{r}
-res_anger_24h <- boot_mean_stability(long_window, 
-                                    "anger_before_list", 
-                                    "anger", "b.")
-```
-
-```{r}
-res_fear_24h <- boot_mean_stability(long_window, 
-                                    "fear_before_list", 
-                                    "fear", "")
-```
-
-```{r}
-p_means_combined <- (res_anger_1h + res_fear_1h) / (res_anger_24h + res_fear_24h)
-
-print(p_means_combined)
-```
-
-```{r}
-ggsave(file.path(dst, "boot_means_comparison.pdf"),
+ggsave(paste0("windows/boot_means_comparison", tag, ".png"),
        plot = p_means_combined,
        width = 6.5, height = 5.5)
 ```
 
+```{r}
+ggsave(file.path(dst, "figures", paste0("boot_means_comparison", tag, ".pdf")),
+       plot = p_means_combined,
+       width = 6.5, height = 5.5)
+```
+## News trustworthiness distribution by window
+
+```{r trustworthiness}
+p_scores_1h <- ggplot(short_window, aes(x = event_score)) +
+  geom_histogram(bins = 50, alpha = 0.8, fill="steelblue") +
+  geom_vline(xintercept = 60, linetype = "dashed", color = "black", size = 1) +
+  scale_x_continuous(breaks = seq(0, 100, 10)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "a.",
+    x = "NewsGuard score",
+    y = "# of events"
+  ) +
+  custom_plot() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.position = "top"
+  )
+
+p_scores_24h <- ggplot(long_window, aes(x = event_score)) +
+  geom_histogram(bins = 50, alpha = 0.8, fill="steelblue") +
+  geom_vline(xintercept = 60, linetype = "dashed", color = "black", size = 1) +
+  scale_x_continuous(breaks = seq(0, 100, 10)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "b.",
+    x = "NewsGuard score",
+    y = ""
+  ) +
+  custom_plot() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.position = "top"
+  )
+
+p_scores_combined <- p_scores_1h | p_scores_24h
+
+ggsave(paste0("windows/window_score_distributions", tag, ".png"),
+       plot = p_scores_combined,
+       width = 6.5, height = 3)
+```
+
+
 ## Statistical model results
 
 ```{r before sharing}
-short_coefs <- read_csv(file = file.path(models_dir, "windows_10_1h", "coefs_window_models.csv")) %>%
+short_coefs <- read_coefs("1h") %>%
   dplyr:::select(emotion, window, model, estimate, ci_lower, ci_upper)%>%
   mutate(window = factor(window, levels = c("before", "after", "change")),
-         emotion = factor(emotion, levels = c("anger", "fear")))
+         emotion = factor(emotion, levels = EMOTIONS))
 
-long_coefs <- read_csv(file = file.path(models_dir, "windows_10_24h", "coefs_window_models.csv")) %>%
+long_coefs <- read_coefs("24h") %>%
   dplyr:::select(emotion, window, model, estimate, ci_lower, ci_upper)%>%
   mutate(window = factor(window, levels = c("before", "after", "change")),
-         emotion = factor(emotion, levels = c("anger", "fear")))
+         emotion = factor(emotion, levels = EMOTIONS))
 
 
 p_short_models <- ggplot(short_coefs, aes(
@@ -354,7 +440,6 @@ p_short_models <- ggplot(short_coefs, aes(
                 width = 0.2, linewidth = 0.8,
                 position = position_dodge(width = 0.5)) +
   scale_color_manual(values = c("lmer" = "#1b9e77", "lm" = "#d95f02")) +
-  scale_y_discrete(labels = c("anger", "fear")) +
   labs(
     title = "a.",
     x = "Coefficient",
@@ -384,7 +469,6 @@ p_long_models <- ggplot(long_coefs, aes(
                 width = 0.2, linewidth = 0.8,
                 position = position_dodge(width = 0.5)) +
   scale_color_manual(values = c("lmer" = "#1b9e77", "lm" = "#d95f02")) +
-  scale_y_discrete(labels = c("anger", "fear")) +
   labs(
     title = "b.",
     x = "Coefficient",
@@ -406,11 +490,13 @@ p_long_models <- ggplot(long_coefs, aes(
 
 p_models_combined <- p_short_models / p_long_models
 
-print(p_models_combined)
+ggsave(paste0("windows/emotions_models_compared", tag, ".png"),
+       plot = p_models_combined,
+       width = 6.5, height = 6.5)
 ```
 
 ```{r}
-ggsave(file.path(dst, "emotions_models_compared.pdf"),
+ggsave(file.path(dst, "figures", paste0("emotions_models_compared", tag, ".pdf")),
        plot = p_models_combined,
        height = 4.5, width = 6.5)
 ```
@@ -418,19 +504,13 @@ ggsave(file.path(dst, "emotions_models_compared.pdf"),
 ## Model diagnostics
 
 ```{r}
-# load all models
-m_anger_24h_before <- readRDS(file.path(models_dir, "windows_10_24h", "lmer_anger_before.rds"))
-m_fear_24h_before <- readRDS(file.path(models_dir, "windows_10_24h", "lmer_fear_before.rds"))
-m_anger_1h_before <- readRDS(file.path(models_dir, "windows_10_1h", "lmer_anger_before.rds"))
-m_fear_1h_before <- readRDS(file.path(models_dir, "windows_10_1h", "lmer_fear_before.rds"))
-m_anger_24h_after <- readRDS(file.path(models_dir, "windows_10_24h", "lmer_anger_after.rds"))
-m_fear_24h_after <- readRDS(file.path(models_dir, "windows_10_24h", "lmer_fear_after.rds"))
-m_anger_1h_after <- readRDS(file.path(models_dir, "windows_10_1h", "lmer_anger_after.rds"))
-m_fear_1h_after <- readRDS(file.path(models_dir, "windows_10_1h", "lmer_fear_after.rds"))
-m_anger_24h_change <- readRDS(file.path(models_dir, "windows_10_24h", "lmer_anger_change.rds"))
-m_fear_24h_change <- readRDS(file.path(models_dir, "windows_10_24h", "lmer_fear_change.rds"))
-m_anger_1h_change <- readRDS(file.path(models_dir, "windows_10_1h", "lmer_anger_change.rds"))
-m_fear_1h_change <- readRDS(file.path(models_dir, "windows_10_1h", "lmer_fear_change.rds"))
+# load all lmer models: models[[size]][[emotion]][[window]]
+WINDOWS <- c("before", "after", "change")
+models <- setNames(lapply(SIZES, function(size)
+  setNames(lapply(EMOTIONS, function(e)
+    setNames(lapply(WINDOWS, function(w)
+      readRDS(file.path(win_dir(size), paste0("lmer_", e, "_", w, ".rds")))), WINDOWS)),
+    EMOTIONS)), SIZES)
 ```
 
 ### Random effects structure
@@ -449,6 +529,9 @@ extract_random_effects <- function(model, emotion, window, size) {
   re_min <- min(re)
   re_max <- max(re)
   re_sd <- sd(re)
+  # random intercepts are deviations from the fixed intercept; user-specific
+  # intercepts (fixed + deviation) are on the scale of the outcome
+  fixed_int <- unname(fixef(model)[1])
   
   n_obs <- nobs(model)
   n_groups <- nlevels(model@frame$author_id)
@@ -467,24 +550,17 @@ extract_random_effects <- function(model, emotion, window, size) {
     ICC = icc_val,
     RE_Min = re_min,
     RE_Max = re_max,
-    RE_SD = re_sd
+    RE_SD = re_sd,
+    Intercept = fixed_int,
+    User_Min = fixed_int + re_min,
+    User_Max = fixed_int + re_max
   )
 }
 
-model_list <- list(
-  list(m_anger_24h_before, "Anger", "Before", "24h"),
-  list(m_anger_1h_before, "Anger", "Before", "1h"),
-  list(m_fear_24h_before, "Fear", "Before", "24h"),
-  list(m_fear_1h_before, "Fear", "Before", "1h"),
-  list(m_anger_24h_after, "Anger", "After", "24h"),
-  list(m_anger_1h_after, "Anger", "After", "1h"),
-  list(m_fear_24h_after, "Fear", "After", "24h"),
-  list(m_fear_1h_after, "Fear", "After", "1h"),
-  list(m_anger_24h_change, "Anger", "Change", "24h"),
-  list(m_anger_1h_change, "Anger", "Change", "1h"),
-  list(m_fear_24h_change, "Fear", "Change", "24h"),
-  list(m_fear_1h_change, "Fear", "Change", "1h")
-)
+model_list <- unlist(lapply(WINDOWS, function(w) unlist(lapply(EMOTIONS, function(e)
+  lapply(rev(SIZES), function(size)
+    list(models[[size]][[e]][[w]], tools::toTitleCase(e), tools::toTitleCase(w), size))),
+  recursive = FALSE)), recursive = FALSE)
 
 re_table <- do.call(rbind, lapply(model_list, function(x) {
   extract_random_effects(x[[1]], x[[2]], x[[3]], x[[4]])
@@ -508,9 +584,9 @@ print(re_table)
 ```{r}
 create_re_latex <- function(re_table) {
   
-  latex <- "\\begin{tabular}{lllccccccc}\n"
+  latex <- "\\begin{tabular}{lllcccccccc}\n"
   latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, "Emotion & Window & Size & ICC & Between SD & Within SD & RE Range & N obs & N users \\\\\n")
+  latex <- paste0(latex, "Emotion & Window & Size & ICC & Between SD & Within SD & RE Range & Intercept & User intercepts & N obs & N users \\\\\n")
   latex <- paste0(latex, "\\hline\n")
   
   for (i in 1:nrow(re_table)) {
@@ -525,6 +601,9 @@ create_re_latex <- function(re_table) {
                     sprintf("%.3f", row$Within_SD), " & ",
                     "[", sprintf("%.2f", row$RE_Min), ", ",
                     sprintf("%.2f", row$RE_Max), "] & ",
+                    sprintf("%.3f", row$Intercept), " & ",
+                    "[", sprintf("%.2f", row$User_Min), ", ",
+                    sprintf("%.2f", row$User_Max), "] & ",
                     row$N_obs, " & ",
                     row$N_users, " \\\\\n")
   }
@@ -532,8 +611,7 @@ create_re_latex <- function(re_table) {
   latex <- paste0(latex, "\\hline\n")
   latex <- paste0(latex, "\\end{tabular}\n")
   
-  # Table S22: Random effects structure
-  writeLines(latex, file.path(dst, "windows_random_effects.tex"))
+  writeLines(latex, file.path(dst, "tables", paste0("windows_random_effects", tag, ".tex")))
   cat("LaTeX table saved to windows_random_effects.tex\n")
   
   return(latex)
@@ -560,7 +638,6 @@ p_short_coefs <- short_coefs%>%
   geom_errorbar(aes(xmin = ci_lower, xmax = ci_upper), 
                 width = 0.2, linewidth = 0.7) +
   scale_color_manual(values = emotion_colors) +
-  scale_y_discrete(labels = c("anger", "fear")) +
   labs(
     title = "a.",
     x = "Coefficient",
@@ -588,7 +665,6 @@ p_long_coefs <- long_coefs%>%
   geom_errorbar(aes(xmin = ci_lower, xmax = ci_upper), 
                 width = 0.2, linewidth = 0.7) +
   scale_color_manual(values = emotion_colors) +
-  scale_y_discrete(labels = c("anger", "fear")) +
   labs(
     title = "b.",
     x = "Coefficient",
@@ -604,17 +680,19 @@ p_long_coefs <- long_coefs%>%
 
 p_coefs_combined <- p_short_coefs / p_long_coefs
 
-print(p_coefs_combined)
+ggsave(paste0("windows/emotions_coefs_compared", tag, ".png"),
+       plot = p_coefs_combined,
+       width = 6.5, height = 6.5)
 ```
 
 ```{r}
-short_coefs$window_size <- "24h"
-long_coefs$window_size <- "1h"
+short_coefs$window_size <- "1h"   # was swapped ("24h"/"1h") in the first submission
+long_coefs$window_size <- "24h"
 
 coefs_combined <- bind_rows(short_coefs, long_coefs) %>%
   filter(model == "lmer") %>%
   mutate(
-    emotion = factor(emotion, levels = c("anger", "fear")),
+    emotion = factor(emotion, levels = EMOTIONS),
     window = factor(window, levels = c("before", "after", "change")),
     window_size = factor(window_size, levels = c("1h", "24h"))
   )
@@ -653,7 +731,7 @@ p_coefs <- ggplot(
   scale_color_manual(values = emotion_colors) +
   scale_alpha_manual(values = c("24h" = 0.5, "1h" = 1)) +
 
-  scale_y_discrete(labels = c("Anger", "Fear")) +
+  scale_y_discrete(labels = tools::toTitleCase) +
   labs(
     x = "Coefficient",
     y = ""
@@ -670,178 +748,57 @@ p_coefs <- ggplot(
     axis.text.x = element_text(size = 9)
   )
 
-print(p_coefs)
+
+ggsave(paste0("windows/emotions_coefs_layered", tag, ".png"),
+       plot = p_coefs,
+       width = 6.5, height = 4.5)
 ```
 
 ```{r}
-ggsave(file.path(dst, "windows_emotions_coefs.pdf"),
+ggsave(file.path(dst, "figures", paste0("windows_emotions_coefs", tag, ".pdf")),
        plot = p_coefs,
        width = 6.5, height = 4.5)
 ```
 
 ## Creating tables summarizing the model results
 ```{r}
-# stargazer wont work on one of the models so we create our own function
-create_before_table <- function(anger_24_model, fear_24_model, anger_1_model, fear_1_model, 
-                                short_coefs, long_coefs, filename) {
-  anger_24_coefs <- broom.mixed::tidy(anger_24_model, effects = "fixed")
-  fear_24_coefs <- broom.mixed::tidy(fear_24_model, effects = "fixed")
-  anger_1_coefs <- broom.mixed::tidy(anger_1_model, effects = "fixed")
-  fear_1_coefs <- broom.mixed::tidy(fear_1_model, effects = "fixed")
-
-  # helper to look up bootstrap CIs from the coefs CSV
-  get_boot_ci <- function(coefs_csv, emotion_val, window_val) {
-    row <- coefs_csv %>%
-      filter(emotion == emotion_val, window == window_val, model == "lmer")
-    if (nrow(row) == 0) return(c(NA, NA))
-    c(row$ci_lower[1], row$ci_upper[1])
-  }
-
-  format_row <- function(label, window, time, coefs, term_name, boot_ci) {
-    row <- coefs[coefs$term == term_name, ]
-    if (nrow(row) == 0) return("")
-    est <- row$estimate[1]
-    se <- row$std.error[1]
-    ci_str <- paste0("[", sprintf("%.3f", boot_ci[1]), ", ", sprintf("%.3f", boot_ci[2]), "]")
-    paste0(label, " & ", window, " & ", time, " & ",
-           sprintf("%.3f", est), " & ", sprintf("%.3f", se), " & ", ci_str, " & ",
-           sprintf("%.1f", row$df[1]), " & ", sprintf("%.3f", row$p.value[1]), " \\\\\n")
-  }
-
-  latex <- ""
-  latex <- paste0(latex, "\\begin{tabular}{lccccccr}\n")
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, "Emotion & Window & Size & Estimate & SE & 95\\% CI & df & p\\\\\n")
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, format_row("Anger", "Before", "1h", anger_1_coefs, "mean_anger_before",
-                                    get_boot_ci(short_coefs, "anger", "before")))
-  latex <- paste0(latex, format_row("Anger", "Before", "24h", anger_24_coefs, "mean_anger_before",
-                                    get_boot_ci(long_coefs, "anger", "before")))
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, format_row("Fear", "Before", "1h", fear_1_coefs, "mean_fear_before",
-                                    get_boot_ci(short_coefs, "fear", "before")))
-  latex <- paste0(latex, format_row("Fear", "Before", "24h", fear_24_coefs, "mean_fear_before",
-                                    get_boot_ci(long_coefs, "fear", "before")))
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, "\\end{tabular}\n")
-
-  writeLines(latex, file.path(dst, filename))
-  cat("LaTeX table written to", file.path(dst, filename), "\n")
-  return(latex)
+# one table per window (before, after, change): estimate, SE, bootstrap CI, df, p
+get_boot_ci <- function(coefs_csv, emotion_val, window_val) {
+  row <- coefs_csv %>% filter(emotion == emotion_val, window == window_val, model == "lmer")
+  if (nrow(row) == 0) return(c(NA, NA))
+  c(row$ci_lower[1], row$ci_upper[1])
 }
 
-# call with the coefs passed in
-# Table S19: LMER predicting untrustworthy sharing from emotion before event
-create_before_table(m_anger_24h_before, m_fear_24h_before, m_anger_1h_before, m_fear_1h_before,
-                    short_coefs, long_coefs, "emotions_before.tex")
-
-```
-
-```{r}
-create_after_table <- function(anger_1_model, anger_24_model, fear_1_model, fear_24_model,
-                               short_coefs, long_coefs, filename) {
-  anger_24_coefs <- broom.mixed::tidy(anger_24_model, effects = "fixed")
-  fear_24_coefs <- broom.mixed::tidy(fear_24_model, effects = "fixed")
-  anger_1_coefs <- broom.mixed::tidy(anger_1_model, effects = "fixed")
-  fear_1_coefs <- broom.mixed::tidy(fear_1_model, effects = "fixed")
-
-  get_boot_ci <- function(coefs_csv, emotion_val, window_val) {
-    row <- coefs_csv %>%
-      filter(emotion == emotion_val, window == window_val, model == "lmer")
-    if (nrow(row) == 0) return(c(NA, NA))
-    c(row$ci_lower[1], row$ci_upper[1])
-  }
-
-  format_row <- function(label, window, time, coefs, term_name, boot_ci) {
-    row <- coefs[coefs$term == term_name, ]
-    if (nrow(row) == 0) return("")
-    est <- row$estimate[1]
-    se <- row$std.error[1]
-    ci_str <- paste0("[", sprintf("%.3f", boot_ci[1]), ", ", sprintf("%.3f", boot_ci[2]), "]")
-    paste0(label, " & ", window, " & ", time, " & ",
-           sprintf("%.3f", est), " & ", sprintf("%.3f", se), " & ", ci_str, " & ",
-           sprintf("%.1f", row$df[1]), " & ", sprintf("%.3f", row$p.value[1]), " \\\\\n")
-  }
-
-  latex <- ""
-  latex <- paste0(latex, "\\begin{tabular}{llccccccr}\n")
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, "Emotion & Window & Size & Estimate & SE & 95\\% CI & df & p\\\\\n")
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, format_row("Anger", "After", "1h", anger_1_coefs, "untrustworthy",
-                                    get_boot_ci(short_coefs, "anger", "after")))
-  latex <- paste0(latex, format_row("Anger", "After", "24h", anger_24_coefs, "untrustworthy",
-                                    get_boot_ci(long_coefs, "anger", "after")))
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, format_row("Fear", "After", "1h", fear_1_coefs, "untrustworthy",
-                                    get_boot_ci(short_coefs, "fear", "after")))
-  latex <- paste0(latex, format_row("Fear", "After", "24h", fear_24_coefs, "untrustworthy",
-                                    get_boot_ci(long_coefs, "fear", "after")))
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, "\\end{tabular}\n")
-
-  writeLines(latex, file.path(dst, filename))
-  cat("LaTeX table written to", file.path(dst, filename), "\n")
-  return(latex)
+format_row <- function(label, window, time, coefs, term_name, boot_ci) {
+  row <- coefs[coefs$term == term_name, ]
+  if (nrow(row) == 0) return("")
+  ci_str <- paste0("[", sprintf("%.3f", boot_ci[1]), ", ", sprintf("%.3f", boot_ci[2]), "]")
+  paste0(label, " & ", window, " & ", time, " & ",
+         sprintf("%.3f", row$estimate[1]), " & ", sprintf("%.3f", row$std.error[1]), " & ",
+         ci_str, " & ", sprintf("%.1f", row$df[1]), " & ", sprintf("%.3f", row$p.value[1]),
+         " \\\\\n")
 }
 
-# Table S20: LMER predicting emotion after sharing from trustworthiness
-create_after_table(m_anger_1h_after, m_anger_24h_after, m_fear_1h_after, m_fear_24h_after,
-                   short_coefs, long_coefs, "emotions_after.tex")
-```
-
-```{r}
-create_change_table <- function(anger_1_model, anger_24_model, fear_1_model, fear_24_model,
-                                short_coefs, long_coefs, filename) {
-  anger_1_coefs <- broom.mixed::tidy(anger_1_model, effects = "fixed")
-  anger_24_coefs <- broom.mixed::tidy(anger_24_model, effects = "fixed")
-  fear_1_coefs <- broom.mixed::tidy(fear_1_model, effects = "fixed")
-  fear_24_coefs <- broom.mixed::tidy(fear_24_model, effects = "fixed")
-
-  get_boot_ci <- function(coefs_csv, emotion_val, window_val) {
-    row <- coefs_csv %>%
-      filter(emotion == emotion_val, window == window_val, model == "lmer")
-    if (nrow(row) == 0) return(c(NA, NA))
-    c(row$ci_lower[1], row$ci_upper[1])
+create_window_table <- function(w, filename) {
+  coef_csv <- list("1h" = short_coefs, "24h" = long_coefs)
+  latex <- paste0("\\begin{tabular}{lccccccr}\n\\hline\n",
+                  "Emotion & Window & Size & Estimate & SE & 95\\% CI & df & p\\\\\n\\hline\n")
+  for (e in EMOTIONS) {
+    term <- if (w == "before") paste0("mean_", e, "_before") else "untrustworthy"
+    for (size in SIZES) {
+      latex <- paste0(latex, format_row(tools::toTitleCase(e), tools::toTitleCase(w), size,
+                                        broom.mixed::tidy(models[[size]][[e]][[w]], effects = "fixed"),
+                                        term, get_boot_ci(coef_csv[[size]], e, w)))
+    }
+    latex <- paste0(latex, "\\hline\n")
   }
-
-  format_row <- function(label, window, time, coefs, term_name, boot_ci) {
-    row <- coefs[coefs$term == term_name, ]
-    if (nrow(row) == 0) return("")
-    est <- row$estimate[1]
-    se <- row$std.error[1]
-    ci_str <- paste0("[", sprintf("%.3f", boot_ci[1]), ", ", sprintf("%.3f", boot_ci[2]), "]")
-    paste0(label, " & ", window, " & ", time, " & ",
-           sprintf("%.3f", est), " & ", sprintf("%.3f", se), " & ", ci_str, " & ",
-           sprintf("%.1f", row$df[1]), " & ", sprintf("%.3f", row$p.value[1]), " \\\\\n")
-  }
-
-  latex <- ""
-  latex <- paste0(latex, "\\begin{tabular}{lccccccr}\n")
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, "Emotion & Window & Size & Estimate & SE & 95\\% CI & df & p\\\\\n")
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, format_row("Anger", "Change", "1h", anger_1_coefs, "untrustworthy",
-                                    get_boot_ci(short_coefs, "anger", "change")))
-  latex <- paste0(latex, format_row("Anger", "Change", "24h", anger_24_coefs, "untrustworthy",
-                                    get_boot_ci(long_coefs, "anger", "change")))
-  latex <- paste0(latex, "\\hline\n")
-  latex <- paste0(latex, format_row("Fear", "Change", "1h", fear_1_coefs, "untrustworthy",
-                                    get_boot_ci(short_coefs, "fear", "change")))
-  latex <- paste0(latex, format_row("Fear", "Change", "24h", fear_24_coefs, "untrustworthy",
-                                    get_boot_ci(long_coefs, "fear", "change")))
-  latex <- paste0(latex, "\\hline\n")
   latex <- paste0(latex, "\\end{tabular}\n")
-
-  writeLines(latex, file.path(dst, filename))
-  cat("LaTeX table written to", file.path(dst, filename), "\n")
-
-  return(latex)
+  writeLines(latex, file.path(dst, "tables", paste0(sub("\\.tex$", "", filename), tag, ".tex")))
+  cat("LaTeX table written to", filename, "\n")
+  latex
 }
 
-# Table S21: LMER testing within-person change in emotion around sharing events
-create_change_table(m_anger_1h_change, m_anger_24h_change, m_fear_1h_change, m_fear_24h_change,
-                    short_coefs, long_coefs, "emotions_change.tex")
+for (w in WINDOWS) create_window_table(w, paste0("emotions_", w, ".tex"))
 ```
 
 
@@ -850,6 +807,8 @@ create_change_table(m_anger_1h_change, m_anger_24h_change, m_fear_1h_change, m_f
 
 ```{r}
 # define function to extract bootstrapped random effects
+# and calculate CIs for caterpillar plots
+
 process_bootstrap_re <- function(boot_file, original_model, model_name) {
   
   cat("Processing", model_name, "...\n")
@@ -893,29 +852,12 @@ process_bootstrap_re <- function(boot_file, original_model, model_name) {
 
 
 ```{r}
-anger_before_re <- process_bootstrap_re(
-  boot_file = file.path(models_dir, "windows_10_1h", "boot_lmer_anger_before.rds"),
-  original_model = m_anger_1h_before,
-  model_name = "anger_before"
-)
-
-fear_before_re <- process_bootstrap_re(
-  boot_file = file.path(models_dir, "windows_10_1h", "boot_lmer_fear_before.rds"),
-  original_model = m_fear_1h_before,
-  model_name = "fear_before"
-)
-
-anger_after_re <- process_bootstrap_re(
-  boot_file = file.path(models_dir, "windows_10_1h", "boot_lmer_anger_after.rds"),
-  original_model = m_anger_1h_after,
-  model_name = "anger_after"
-)
-
-fear_after_re <- process_bootstrap_re(
-  boot_file = file.path(models_dir, "windows_10_1h", "boot_lmer_fear_after.rds"),
-  original_model = m_fear_1h_after,
-  model_name = "fear_after"
-)
+# random effects with bootstrap CIs, 1h window: re[[emotion]][[before|after]]
+re <- setNames(lapply(EMOTIONS, function(e) setNames(lapply(c("before", "after"), function(w)
+  process_bootstrap_re(
+    boot_file = file.path(win_dir("1h"), paste0("boot_lmer_", e, "_", w, ".rds")),
+    original_model = models[["1h"]][[e]][[w]],
+    model_name = paste(e, w, sep = "_"))), c("before", "after"))), EMOTIONS)
 ```
 ```{r}
 # define function to plot the caterpillar plot per model 
@@ -959,51 +901,31 @@ plot_caterpillar <- function(re_df, title,
 
   return(p)
 }
+
 ```
 
 
 ```{r}
-p1 <- plot_caterpillar(
-  anger_before_re,
-  title = "untrustworthy by anger",
-  n_display = 1000
-) + labs(tag = "a")
+# rows: emotions; columns: untrustworthy by emotion (before), emotion by untrustworthy (after)
+cat_panels <- unlist(lapply(seq_along(EMOTIONS), function(i) {
+  e <- EMOTIONS[i]
+  list(
+    plot_caterpillar(re[[e]]$before, title = paste("untrustworthy by", e), n_display = 1000) +
+      labs(tag = letters[2 * i - 1]) + if (i > 1) theme(axis.title.y = element_blank()) else NULL,
+    plot_caterpillar(re[[e]]$after, title = paste(e, "by untrustworthy"), n_display = 1000) +
+      labs(tag = letters[2 * i]) + theme(axis.title.y = element_blank()))
+}), recursive = FALSE)
 
-p2 <- plot_caterpillar(
-  anger_after_re,
-  title = "anger by untrustworthy",
-  n_display = 1000
-) + labs(tag = "b")
-
-p3 <- plot_caterpillar(
-  fear_before_re,
-  title = "untrustworthy by fear",
-  n_display = 1000
-)+
-  theme(
-    axis.title.y = element_blank()
-  ) + labs(tag = "c")
-p4 <- plot_caterpillar(
-  fear_after_re,
-  title = "fear by untrustworthy",
-  n_display = 1000
-) +
-  labs(tag = "d") +
-  theme(
-    axis.title.y = element_blank()
-  )
-
-# arrange them all in 2x2 grid
-p_caterpillar <- (p1 | p2) / (p3 | p4) &
+caterpillar_plot <- wrap_plots(cat_panels, ncol = 2) &
   theme(plot.tag = element_text(size = 16, face = "bold"))
 
-print(p_caterpillar)
-```
+ggsave(paste0("windows/caterpillar_combined", tag, ".png"),
+       plot = caterpillar_plot,
+       width = 6.5, height = 1.75 * length(EMOTIONS))
 
-```{r}
-ggsave(file.path(dst, "windows_caterpillar_combined.pdf"),
-       plot = p_caterpillar,
-       width = 6.5, height = 3.5)
+ggsave(file.path(dst, "figures", paste0("windows_caterpillar_combined", tag, ".pdf")),
+       plot = caterpillar_plot,
+       width = 6.5, height = 1.75 * length(EMOTIONS))
 ```
 
 ## Create supersharer panels (a, b)
@@ -1053,7 +975,7 @@ threshold_trustworthy <- min(which(trustworthy_by_user$cumsum_prop >= 0.80))
 percentile_trustworthy <- trustworthy_by_user$percentile[threshold_trustworthy]
 
 users_combined <- bind_rows(untrustworthy_by_user, trustworthy_by_user)
-````
+```
 
 ```{r}
 p_supersharers_cdf <- ggplot(users_combined,
@@ -1086,16 +1008,32 @@ p_supersharers_cdf <- ggplot(users_combined,
     plot.tag = element_text(size = 16, face = "bold")
   )
 
-print(p_supersharers_cdf)
+ggsave(paste0("windows/supersharers_cdf", tag, ".png"),
+       plot = p_supersharers_cdf,
+       width = 3.5, height = 2.5)
 ```
 
+
+
+
 ```{r}
-supersharers <- read_csv(file.path(src, "Austria-Panel-Supersharers.csv"),
+supersharers <- read_csv(file.path(src, paste0("Austria-Panel-Supersharers",
+                                              if (LANG == "de_en") "" else paste0("-", LANG), ".csv")),
                          col_types = cols(
                            author_id = col_character(),
                            group = col_character(),
                            .default = col_double()
                          ))
+
+# group means of all emotion features (reported in the text)
+supersharers %>%
+  group_by(group) %>%
+  summarise(across(all_of(as.vector(outer(EMOTIONS, c("baseline", "variability", "instability", "inertia"),
+                                          paste, sep = "_"))),
+                   ~ mean(.x[is.finite(.x)])), n = n()) %>%
+  pivot_longer(-c(group, n)) %>%
+  pivot_wider(names_from = group, values_from = c(value, n)) %>%
+  print(n = Inf)
 
 anger_plot_data <- supersharers %>%
   select(author_id, group,
@@ -1189,13 +1127,16 @@ p_supersharers_anger <- ggplot(anger_plot_data, aes(x = value, fill = group, col
     plot.tag = element_text(size = 16, face = "bold")
   )
 
-print(p_supersharers_anger)
+ggsave(paste0("windows/supersharers_emotion_comparison", tag, ".png"),
+       plot = p_supersharers_anger,
+       width = 6.5, height = 3.2)
 ```
 
 
 ```{r}
 # add the features plot as panel a
-boot_objects <- readRDS("users/user_models_tweet_boot.rds")
+boot_objects <- readRDS(paste0(file.path(dst, "users"), "/user_models_tweet_boot_", LANG,
+                               if (DISGUST) "_disgust" else "", ".rds"))
 
 boot_news_base <- boot_objects$boot_news_base
 boot_news_var <- boot_objects$boot_news_var
@@ -1252,8 +1193,10 @@ boot_results_plot <- boot_results %>%
     OR_upper = exp(upper),
     emotion = case_when(
       grepl("anger", parameter) ~ "anger",
-      grepl("fear", parameter) ~ "fear"
+      grepl("fear", parameter) ~ "fear",
+      grepl("disgust", parameter) ~ "disgust"
     ),
+    emotion = factor(emotion, levels = EMOTIONS),
     feature = factor(feature, levels = c("baseline", "variability", "instability", "inertia")),
     outcome = factor(outcome, levels = c("any news", "partisan news", "untrustworthy news"))
   )
@@ -1271,8 +1214,7 @@ or_plot <- ggplot(boot_results_plot, aes(x = OR, y = feature, color = emotion)) 
   labs(x = "Odds Ratio (95% CI)",
        y = "",
        color = "") +
-  scale_color_manual(values = c("anger" = "#e41a1c", 
-                                "fear" = "#377eb8")) +
+  scale_color_manual(values = emotion_colors) +
   scale_y_discrete(limits = c("inertia", 
                               "instability", 
                               "variability", 
@@ -1298,11 +1240,19 @@ combined_fig2 <- ((or_plot + labs(tag = "a") +
   bottom_row) +
   plot_layout(heights = c(1, 0.9))
 
-print(combined_fig2)
+ggsave(paste0("windows/individual_plot", tag, ".png"),
+  plot = combined_fig2,
+  width = 6.5, height = 6.5)
+
+ggsave(paste0("windows/individual_plot", tag, ".png"),
+       plot = combined_fig2,
+  width = 8.8, height = 9.0)
 ```
 ```{r}
-ggsave(file.path(dst, "individual_plot.pdf"),
-       plot = combined_fig2)
+ggsave(file.path(dst, "figures", paste0("individual_plot", tag, ".pdf")),
+       plot = combined_fig2,
+       dpi=300,
+       width = 6.5, height = 6.5)
 ```
 
 ## Run all chunks above

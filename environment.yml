@@ -1,4 +1,4 @@
-name: emomis-users
+name: panel-analysis
 channels:
   - defaults
   - conda-forge
@@ -9,6 +9,8 @@ dependencies:
   - pandas
   - seaborn
   - matplotlib
+  - scikit-learn
+  - krippendorff
   - tokenizers
   - ipykernel
   - dask
@@ -37,6 +39,7 @@ dependencies:
   - tslearn
   - r-corrplot
   - r-gridextra
+  - r-ggrepel
   - r-kableextra
   - r-factoextra
   - networkx
@@ -44,3 +47,15 @@ dependencies:
   - r-performance
   - r-dharma
   - r-glmmtmb
+  - r-boot
+  - r-broom
+  - r-broom.mixed
+  - r-car
+  - r-factominer
+  - r-ggraph
+  - r-igraph
+  - r-lme4
+  - r-proc
+  - r-zoo
+  - r-knitr
+  - r-rmarkdown

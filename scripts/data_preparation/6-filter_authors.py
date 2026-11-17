@@ -1,18 +1,15 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Filter the author list to the analysis sample using two criteria:
-#         (1) remove authors with >=20 tweets on any single day (bot/spam filter);
-#         (2) keep only authors with 50 < followers_count < 100,000.
-#         Joins filtered IDs with Austria-Panel-Users.csv.gz to attach user metadata.
-# Input:  Austria-Panel-Tweets.csv.gz
-#         Austria-Panel-Users.csv.gz
-# Output: authors_filtered.csv
-# Usage:  python 6-filter_authors.py <DATA_DIR>
+# Task:   Define the analysis sample: drop authors with >= 20 tweets on any day and keep authors
+#         with 50 < followers < 100,000.
+# Input:  data/Austria-Panel-Tweets.csv.gz (not released)
+#         data/Austria-Panel-Users.csv.gz (not released)
+# Output: data/authors_filtered.csv
+# Run:    python 6-filter_authors.py ../../data
 
 import polars as pl
 from os.path import join
 import sys
 
-src = sys.argv[1] # /misinfo-panel-austria/data
+src = sys.argv[1] # <DATA_DIR>
 
 # tweets: get per-author, per-day counts
 authors = (

@@ -4,10 +4,10 @@ inference/emotions/pol_emo_mDeBERTa2.zip
 
 
 # Data
-data
-data.tar.gz
+data*
 
 # Output files
+output/
 output/*.csv
 output/*.png
 output/*.jpg
@@ -190,3 +190,10 @@ cython_debug/
 
 # Claude files
 .claude/
+# Intermediate analysis outputs (v2)
+scripts/analysis/users/
+scripts/analysis/windows/
+scripts/analysis/windows_models/
+*_cache/
+*_files/
+scripts/**/*.html

@@ -1,13 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Apply fine-tuned mDeBERTa model to infer 8 emotion dimensions per tweet.
-#         Emotions: anger_v2, fear_v2, disgust_v2, sadness_v2, joy_v2,
-#                   enthusiasm_v2, pride_v2, hope_v2
-# Input:  <DATA_DIR>/emotions/split_files/Austria-Panel-Text_*.csv.gz  (output of 2-split_files.py)
-#         <script_dir>/pol_emo_mDeBERTa/model/pytorch_model.pt  (fine-tuned weights; not in repo)
-# Output: <DATA_DIR>/emotions/emotion_inference.csv.gz  (columns: id + 8 emotion scores)
-# Usage:  python 3-infer_emotion_split.py <DATA_DIR>
-# Note:   GPU (CUDA) strongly recommended; batch size 32, max token length 280.
-#         Model: https://github.com/tweedmann/pol_emo_mDeBERTa2
+# Task:   Classify 8 emotions per tweet with the fine-tuned mDeBERTa model (weights in
+#         pol_emo_mDeBERTa/, see README; GPU recommended).
+# Input:  data/emotions/split_files/*.csv.gz (not released)
+# Output: data/emotions/emotion_inference.csv.gz (not released)
+# Run:    python 3-infer_emotion_split.py ../../../data
 
 #from https://github.com/tweedmann/pol_emo_mDeBERTa2/releases/tag/v.1.0.0
 import torch
@@ -26,7 +21,7 @@ import sys
 import dask.dataframe as dd
 
 # set data directory (absolute so it survives the chdir below)
-src = os.path.abspath(sys.argv[1]) # e.g. /misinfo-panel-austria/data/emotions/
+src = os.path.abspath(sys.argv[1]) # <DATA_DIR>
 
 # set working directory to pol_emo_mDeBERTa (script-relative, not cwd-relative)
 script_dir = os.path.dirname(os.path.abspath(__file__))

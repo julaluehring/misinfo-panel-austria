@@ -1,3 +1,9 @@
+# Task:   Download the Brandwatch query results day by day (2019-01-01 to 2023-04-01). Fill in
+#         your API token and project ID first.
+# Input:  Brandwatch API (account with access to the project and query)
+# Output: <name>.json (one line of JSON per API page)
+# Run:    bash GetTweetsQuery.sh <query_id> <name>
+
 #curl -X POST --data-urlencode 'password=YOUR_PASSWORD' 'https://api.brandwatch.com/oauth/token?username=YOUR_EMAIL&grant_type=api-password&client_id=brandwatch-api-client'
 
 # YOUR_QUERY_ID

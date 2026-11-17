@@ -1,44 +1,69 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Fit and diagnose a VAR (Vector Autoregression) model on the daily time series.
-#         Tests lag selection, residual autocorrelation, and Granger causality.
-# Input:  data/Austria-Panel-Daily.csv
-# Output: output/irf_plot.pdf
+<!--
+Task:   VAR of untrustworthy news sharing, fear and anger: Granger tests, bootstrapped impulse
+        responses and FEVD, and the SI robustness checks.
+Input:  data/Austria-Panel-Daily-{de_en,de,all}.csv
+        data/Austria-Panel-Daily-Thresholds.csv
+Output: output/tables/*.tex, output/figures/irf_plot*.pdf
+        (bootstrap results are cached in 3a-test_var_cache/)
+Run:     As R Markdown or in terminal as Rscript -e 'rmarkdown::render("3a-test_var.Rmd")'
+-->
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE,
-                      fig.width = 6, 
-                      fig.height = 3,
-                      dpi=300)
-
-options(scipen=999)
-set.seed(636)
-```
-
-```{r load packages}
 library(readr)
 library(scales)
 library(tidyverse)
-library(dplyr)
 library(patchwork)
 library(broom)
 library(kableExtra)
+library(parallel)
+
 library(forecast)
 library(tseries)
-#library(TRA)
-library(vars)
+library(vars)     # VAR, causality, irf, fevd
 library(lmtest)
-library(tsoutliers)
-library(tsDyn)  #VECM
+library(urca)     # ca.jo
+
+knitr::opts_chunk$set(echo = TRUE, fig.width = 6.5, fig.height = 3.5)
+options(scipen = 999)
+set.seed(636)
 ```
 
+## Parameters
+
 ```{r paths}
-src <- here::here("data")
-dst <- here::here("output")
+src <- "../../data"
+dst <- "../../output"
+for (d in c("figures", "tables")) dir.create(file.path(dst, d), recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r parameters}
+
+LANG      <- "de_en"   # main: de_en; SI: de, all
+THR       <- "065"     # main: 065 (score >= 0.65); SI: 05 (score >= 0.5), q3 (third quartile)
+EMOTIONS  <- c("fear", "anger")  # main; disgust only as robustness check (see below)
+P_FIXED   <- NULL      # NULL = lag order selected by SC; or set a number
+BOOT_RUNS <- 10000     # IRF and FEVD bootstrap runs (main analysis)
+BOOT_ROB  <- 1000      # bootstrap runs in the robustness section
+N_CORES   <- 4        # FEVD bootstrap
+
+# output suffix, so that non-main runs do not overwrite the main tables and figures
+main_spec <- LANG == "de_en" && THR == "065" && identical(EMOTIONS, c("fear", "anger"))
+tag <- if (main_spec) "" else paste0("_", LANG, "_", THR, "_", paste(EMOTIONS, collapse = "-"))
+
+# variable names and labels (Cholesky order: untrustworthy news first)
+endo <- c("ts_score", paste0("ts_", EMOTIONS))
+LAB  <- c(ts_score = "Untrustworthy news", ts_fear = "Fear",
+          ts_anger = "Anger", ts_disgust = "Disgust")[endo]
+lab  <- setNames(tolower(LAB), endo)
+
+# structural breaks in the untrustworthy news series (NewsGuard; language-independent)
+BREAK1 <- as.Date("2022-07-01")
+BREAK2 <- as.Date("2022-08-28")
 ```
 
 ```{r custom plots}
 custom_plot <- function() {
-  theme_classic() +  
+  theme_classic() +
     theme(
       axis.title.x = element_text(size = 14),
       axis.title.y = element_text(size = 14),
@@ -48,644 +73,716 @@ custom_plot <- function() {
       legend.text  = element_text(size = 11)
     )
 }
+
+# p-values for LaTeX: "$<$.001" or ".023" (no leading zero)
+fmt_p_tex <- function(p) ifelse(p < 0.001, "$<$.001", sub("^0", "", sprintf("%.3f", p)))
+
+save_tex <- function(x, name) {
+  writeLines(as.character(x), file.path(dst, "tables", paste0(name, tag, ".tex")))
+}
 ```
 
-```{r}
-src <- "../../data"
-dst <- "../../output"
-dir.create(dst, recursive = TRUE, showWarnings = FALSE)
+## Data
+
+```{r data-functions}
+# daily shares in %:
+#   prop_news  = tweets with a news link / all tweets
+#   prop_trust = tweets linking to untrustworthy news (NewsGuard < 60) / tweets with a news link
+#   prop_<emo> = tweets with the emotion / classified tweets in the selected languages
+# thr:   "065" (main), "05", or "q3"
+# denom: "n_scored" (revision) or "tweet_count" (first submission)
+# cutoff: NULL (as published) or a NewsGuard cutoff (requires N_<cutoff>, n_rated)
+# smooth_k: trailing rolling mean over k days
+prep_daily <- function(df, thr = THR, denom = "n_scored", emotions = EMOTIONS,
+                       cutoff = NULL, smooth_k = 1) {
+  df <- df %>%
+    mutate(day = as.Date(day)) %>%
+    arrange(day) %>%
+    mutate(
+      prop_news  = count_ng_domains / tweet_count * 100,
+      prop_trust = (count_caution + count_max_caution) / count_ng_domains * 100
+    )
+  for (e in emotions) {
+    df[[paste0("prop_", e)]] <- df[[paste0("count_", e, "_", thr)]] / df[[denom]] * 100
+  }
+  if (!is.null(cutoff)) {
+    df <- df %>% mutate(prop_trust = .data[[paste0("N_", cutoff)]] / n_rated * 100)
+  }
+  if (smooth_k > 1) {
+    cols <- c("prop_news", "prop_trust", paste0("prop_", emotions))
+    df <- df %>%
+      mutate(across(all_of(cols),
+                    ~ as.numeric(stats::filter(.x, rep(1 / smooth_k, smooth_k), sides = 1)))) %>%
+      filter(!is.na(prop_trust))
+  }
+  df
+}
+
+read_daily <- function(lang) {
+  read.csv(file.path(src, paste0("Austria-Panel-Daily-", lang, ".csv")))
+}
 ```
 
-```{r}
-daily_summary$day <- as.Date(daily_summary$day, format = "%Y-%m-%d")
-summary(daily_summary)
-```
+```{r data}
+daily_file <- file.path(src, paste0("Austria-Panel-Daily-", LANG, ".csv"))
+daily_summary <- prep_daily(read_daily(LANG), thr = THR)
+stopifnot(!anyNA(daily_summary[, c("prop_news", "prop_trust", paste0("prop_", EMOTIONS))]))
 
-```{r}
-daily_summary <- daily_summary %>% arrange(day)
-head(daily_summary, 5)
-```
-
-```{r}
-# create proportions
-daily_summary <- daily_summary %>%
-  mutate(
-    prop_news = (count_ng_domains / tweet_count)*100,
-    prop_trust = ((count_caution + count_max_caution) / count_ng_domains)*100,
-    prop_anger = (count_anger / tweet_count)*100,
-    prop_fear = (count_fear / tweet_count)*100
-  )
-
-head(daily_summary,2)
-```
-
-```{r}
 start_date <- min(daily_summary$day)
-start_year <- year(start_date)
-start_day  <- yday(start_date)  # day of year for start
+mk_ts <- function(x) ts(x, start = c(year(start_date), yday(start_date)), frequency = 7)
+
+ts_news  <- mk_ts(daily_summary$prop_news)
+ts_score <- mk_ts(daily_summary$prop_trust)
+for (e in EMOTIONS) assign(paste0("ts_", e), mk_ts(daily_summary[[paste0("prop_", e)]]))
+
+n     <- nrow(daily_summary)
+step1 <- as.numeric(daily_summary$day >= BREAK1)
+step2 <- as.numeric(daily_summary$day >= BREAK2)
+exog  <- cbind(step1, step2, ts_news)
+
+data_I1 <- do.call(cbind, mget(endo))   # endogenous variables, Cholesky order
+colnames(data_I1) <- endo
+
+cat(sprintf("%s, threshold %s: %d days (%s to %s); classified tweets: %s of %s\n",
+            LANG, THR, n, min(daily_summary$day), max(daily_summary$day),
+            format(sum(daily_summary$n_scored), big.mark = ","),
+            format(sum(daily_summary$tweet_count), big.mark = ",")))
 ```
 
-```{r}
-ts_score <- ts(daily_summary$prop_trust, 
-               start = c(start_year, start_day), 
-               frequency = 7 
-               )
+```{r descriptives}
+# shares for the manuscript (Methods): overall and mean daily shares
+overall <- sapply(EMOTIONS, function(e)
+  sum(daily_summary[[paste0("count_", e, "_", THR)]]) / sum(daily_summary$n_scored) * 100)
+round(overall, 2)
 
-
-ts_news <- ts(daily_summary$prop_news,
-                  start = c(start_year, start_day), 
-                  frequency = 7 
-                 )
-
-range(ts_score); range(ts_news)
+daily_summary %>%
+  summarise(across(c(prop_news, prop_trust, all_of(paste0("prop_", EMOTIONS))),
+                   list(mean = mean, sd = sd, min = min, max = max))) %>%
+  pivot_longer(everything(), names_to = c("variable", ".value"),
+               names_pattern = "prop_(.*)_(mean|sd|min|max)") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
 ```
 
-```{r}
-ts_fear <- ts(daily_summary$prop_fear,
-                  start = c(start_year, start_day), 
-                  frequency = 7 
-                 )
+## Relationships between variables
 
+```{r correlations}
+correlation_matrix <- cor(cbind(news = ts_news, data_I1))
+colnames(correlation_matrix) <- rownames(correlation_matrix) <- c("News", LAB)
+round(correlation_matrix, 2)
+round(cor(diff(cbind(news = ts_news, data_I1))), 2)   # daily changes
 
-ts_anger <- ts(daily_summary$prop_anger,
-                  start = c(start_year, start_day), 
-                  frequency = 7 
-                 )
-
-
-range(ts_fear); range(ts_anger)
+save_tex(kable(correlation_matrix, format = "latex", booktabs = TRUE,
+               linesep = "", digits = 3),
+         "correlation_matrix")
 ```
-
-```{r}
-data_ts <- cbind(ts_news, ts_score, ts_fear, ts_anger)
-colnames(data_ts) <- c("news", "misinfo", "fear", "anger")
-plot(data_ts, main = "All time series")
-```
-
-## Relationships between variables: VAR & VECM
-
-```{r}
-# Table S8: Correlation matrix
-cor_matrix <- round(cor(data_ts), 3)
-print(cor_matrix)
-
-cor_latex <- kable(as.data.frame(cor_matrix),
-                   format = "latex",
-                   booktabs = TRUE,
-                   digits = 3)
-writeLines(as.character(cor_latex), file.path(dst, "correlation_table.tex"))
-```
-
-There might be some overlap between the variables so that we move on to multivariate modeling techniques, treating all variables to be endogeneous (as a complete system if you will). 
-For a strategy called Vector Autoregressive Modeling, the time series have to be stationary. Depending on the package, the data has to be transformed. When using the vars library, its function VAR allows you to include trend and seasonality components.
 
 ### Stationarity tests
 
-```{r}
-unit_root_table <- data.frame(
-  Variable = character(),
-  ADF = character(),
-  PP = character(),
-  KPSS = character(),
-  stringsAsFactors = FALSE
-)
-
-variables <- list(
-  "News" = ts_news,
-  "Misinformation" = ts_score,
-  "Fear" = ts_fear,
-  "Anger" = ts_anger
-)
-
-# Run tests for each variable
-for(var_name in names(variables)) {
-  
-  cat("Testing:", var_name, "\n")
-  ts_var <- variables[[var_name]]
-  
-  # ADF test
-  adf_result <- adf.test(ts_var)
-  adf_stat <- round(adf_result$statistic, 2)
-  adf_p <- ifelse(adf_result$p.value < 0.001, "<0.001", 
-                  sprintf("%.3f", adf_result$p.value))
-  adf_str <- paste0(adf_stat, " (", adf_p, ")")
-  
-  # Phillips-Perron test
-  pp_result <- pp.test(ts_var)
-  pp_stat <- round(pp_result$statistic, 2)
-  pp_p <- ifelse(pp_result$p.value < 0.001, "<0.001", 
-                  sprintf("%.3f", pp_result$p.value))
-  pp_str <- paste0(pp_stat, " (", pp_p, ")")
-  
-  # KPSS test
-  kpss_result <- kpss.test(ts_var, null = "Level")
-  kpss_stat <- round(kpss_result$statistic, 2)
-  kpss_p <- ifelse(kpss_result$p.value > 0.10, ">0.10",
-                   ifelse(kpss_result$p.value < 0.001, "<0.001",
-                          sprintf("%.3f", kpss_result$p.value)))
-  kpss_str <- paste0(kpss_stat, " (", kpss_p, ")")
-  
-  unit_root_table <- rbind(unit_root_table, data.frame(
-    Variable = var_name,
-    ADF = adf_str,
-    PP = pp_str,
-    KPSS = kpss_str,
-    stringsAsFactors = FALSE
-  ))
+```{r unit-roots}
+fmt_p <- function(p, lower = 0.01, upper = 0.99, tol = 1e-8) {
+  if (p <= lower + tol) return("$\\leq$.01")
+  if (p >= upper - tol) return(sprintf("$\\geq$%s", sub("^0", "", sprintf("%.2f", upper))))
+  sub("^0", "", sprintf("%.3f", p))
 }
 
-unit_root_latex_table <- kable(unit_root_table, 
-      format = "latex",
-      booktabs = TRUE,
-      align = c("l", "c", "c", "c"),
-      col.names = c("Variable", "ADF", "PP", "KPSS"))
+variables <- c(list("News" = ts_news),
+               setNames(lapply(endo, function(v) get(v)), LAB))
 
-# save table
-# Table S9: Unit root tests
-out <- file.path(dst, "unit_root_table.tex")
-writeLines(as.character(unit_root_latex_table), out)
+unit_root_table <- map_dfr(names(variables), function(var_name) {
+  x <- variables[[var_name]]
+  adf  <- adf.test(x)
+  pp   <- pp.test(x)
+  kpss <- kpss.test(x, null = "Level")
+  tibble(
+    Variable = var_name,
+    ADF  = paste0(sprintf("%.2f", adf$statistic),  " (", fmt_p(adf$p.value), ")"),
+    PP   = paste0(sprintf("%.2f", pp$statistic),   " (", fmt_p(pp$p.value), ")"),
+    KPSS = paste0(sprintf("%.2f", kpss$statistic), " (", fmt_p(kpss$p.value, upper = 0.10), ")")
+  )
+})
+unit_root_table
+
+save_tex(kable(unit_root_table, format = "latex", booktabs = TRUE,
+               align = c("l", "c", "c", "c"), escape = FALSE),
+         "unit_root_table")
 ```
 
-All variables are non-stationary except for misinformation, which has two structural breaks. 
-We test for co-integration. 
+### Lag order
 
+The [forecast tutorial](https://otexts.com/fpp2/VAR.html): for VAR models, prefer
+SC (BIC) over AIC, which tends to choose many lags. Lütkepohl (2005, Section 6.2):
+if trends are captured by other means (e.g., dummies for structural breaks), the
+constant-only specification is preferable.
+
+```{r lag-selection}
+sel <- VARselect(data_I1, lag.max = 14, type = "const", exogen = exog)
+sel$selection
+P <- if (is.null(P_FIXED)) sel$selection[["SC(n)"]] else P_FIXED
+cat("Lag order used:", P, "\n")
+
+# lag order of the differenced system (for the Johansen test)
+VARselect(diff(data_I1), exogen = diff(exog))$selection
+```
 
 ### Tests for co-integration
 
-```{r}
-n <- length(ts_score)
-step1 <- ifelse(seq_len(n) >= 1278, 1, 0)  
-step2 <- ifelse(seq_len(n) >= 1336, 1, 0)  
-data_I1 <- cbind(ts_score, ts_fear, ts_anger)  # I(1) variables only
-exog_vars <- cbind(ts_news, step1, step2)      # I(0) + break dummies
+```{r johansen}
+jo_results <- ca.jo(data_I1, type = "trace", ecdet = "const",
+                    K = P, spec = "transitory",
+                    dumvar = cbind(step1, step2))  # structural break dummies
+summary(jo_results)
 
-VARselect(diff(data_I1), exogen = diff(exog_vars))
-```
-
-
-
-The [forecast tutorial](https://otexts.com/fpp2/VAR.html) says: "VARselect() for selecting the number of lags (p) using four different information criteria: AIC, HQ, SC and FPE. We have met the AIC before, and SC is simply another name for the BIC (SC stands for Schwarz Criterion, after Gideon Schwarz who proposed it). HQ is the Hannan-Quinn criterion, and FPE is the “Final Prediction Error” criterion.27 Care should be taken when using the AIC as it tends to choose large numbers of lags. Instead, for VAR models, we prefer to use the BIC."
-
-**--> Start with SC and use a simpler lag structure if in doubt as time series tend to explode with too many lags**
-
-```{r}
-summary(ca.jo(data_I1, type = "trace", ecdet = "trend",    
-                 K = 6, spec = "transitory",
-                 dumvar = cbind(step1, step2))  # structural break dummies
-)
-```
-
-From Lütkepohl (2005, Section 6.2): "If the data have no obvious deterministic trend, or if trends are captured by other means (e.g., dummy variables for structural breaks), the constant-only specification is preferable."
-
-```{r}
-jo_results <- ca.jo(data_I1, type = "trace", ecdet = "const",    
-                 K = 6, spec = "transitory",
-                 dumvar = cbind(step1, step2))  # structural break dummies
-        
-
-test_stats <- jo_results@teststat
+test_stats  <- jo_results@teststat
 crit_values <- jo_results@cval
-r_values <- 0:(length(test_stats) - 1)
+
+# urca orders rows from r <= K-1 down to r = 0; reverse to r = 0 first
+h0  <- trimws(sub("\\|", "", rownames(crit_values)))
+h0  <- sub("<=", "$\\\\leq$", h0)
+ord <- rev(seq_along(test_stats))
 
 jo_results_table <- data.frame(
-  r = paste0("r <= ", r_values),
-  Statistic = round(test_stats, 2),
-  "10%" = crit_values[, 1],
-  "5%" = crit_values[, 2],
-  "1%" = crit_values[, 3],
+  H0        = h0[ord],
+  Statistic = round(test_stats[ord], 2),
+  "10%"     = crit_values[ord, 1],
+  "5%"      = crit_values[ord, 2],
+  "1%"      = crit_values[ord, 3],
   check.names = FALSE
 )
+jo_results_table
 
-jo_results_latex <- kable(jo_results_table, 
-      format = "latex",
-      booktabs = TRUE,
-      align = c("l", "r", "r", "r", "r"))
-
-# Table S10: Johansen cointegration test
-out <- file.path(dst, "jo_results_table.tex")
-writeLines(as.character(jo_results_latex), out)
+save_tex(kable(jo_results_table, format = "latex", booktabs = TRUE, row.names = FALSE,
+               align = c("l", "r", "r", "r", "r"),
+               col.names = c("$H_0$", "Statistic", "10\\%", "5\\%", "1\\%"),
+               escape = FALSE),
+         "jo_results_table")
 ```
 
-Both specifications say r = 3 --> Use VAR in levels / this is called "full rank" co-integration.
-From Lütkepohl (2005): "If the number of cointegrating vectors equals the number of variables (r = K), the system is stationary and a standard VAR in levels is appropriate."
+If the rank equals the number of variables (r = K, full rank), the system is
+stationary and a standard VAR in levels is appropriate (Lütkepohl, 2005).
 
-### Finding the rightt VAR model in levels
+### VAR in levels: diagnostics
 
-```{r}
-VARselect(data_I1, exogen = cbind(step1, step2, ts_news))
-```
+```{r var-diagnostics}
+summary_df <- map_dfr(sort(unique(pmax(1, c(P - 1, P, P + 1)))), function(p) {
+  m <- VAR(data_I1, p = p, type = "const", exogen = exog)
+  r <- roots(m)
+  s <- serial.test(m, lags.pt = 16, type = "PT.asymptotic")$serial
+  a <- arch.test(m, lags.multi = 12)$arch.mul
+  j <- normality.test(m, multivariate.only = TRUE)$jb.mul$JB
+  tibble(p = p, stable = all(r < 1), max_root = max(r),
+         serial_chisq = unname(s$statistic), serial_df = unname(s$parameter), serial_p = s$p.value,
+         arch_chisq = unname(a$statistic), arch_df = unname(a$parameter), arch_p = a$p.value,
+         norm_stat = unname(j$statistic), norm_df = unname(j$parameter), norm_p = j$p.value,
+         aic = AIC(m), bic = BIC(m))
+})
 
-```{r}
-summary_df <- data.frame(
-  p = integer(),
-  stable = logical(),
-  max_root = numeric(),
-  serial_chisq = numeric(),
-  serial_p = numeric(),
-  arch_chisq = numeric(), 
-  arch_p = numeric(),
-  norm_stat = numeric(),
-  norm_p = character(),
-  aic = numeric(),
-  bic = numeric()
-)
-
-for(p in 7:9) {
-  var_model <- VAR(data_I1, 
-                   p = p, 
-                   type = "const",
-                   exogen = cbind(step1, step2, ts_news))
-  
-   # stability
-  roots_var <- roots(var_model)
-  is_stable <- all(roots_var < 1)
-  max_root <- max(roots_var)
-  
-  # serial correlation
-  serial_test <- serial.test(var_model, lags.pt = 16, type = "PT.asymptotic")
-  serial_chisq <- serial_test$serial$statistic
-  serial_p_value <- serial_test$serial$p.value
-  serial_p <- ifelse(serial_p_value < 0.001, "<0.001", sprintf("%.3f", serial_p_value))
-  
-  # arch test
-  arch_test <- arch.test(var_model, lags.multi = 12)
-  arch_chisq <- arch_test$arch.mul$statistic
-  arch_p_value <- arch_test$arch.mul$p.value
-  arch_p <- ifelse(arch_p_value < 0.001, "<0.001", sprintf("%.3f", arch_p_value))
-  
-  # normality
-  norm_test <- normality.test(var_model, multivariate.only = TRUE)
-  norm_stat <- norm_test$jb.mul$JB$statistic
-  norm_p_value <- norm_test$jb.mul$JB$p.value
-  norm_p <- ifelse(norm_p_value < 0.001, "<0.001", sprintf("%.3f", norm_p_value))
-  
-  # information criteria
-  aic_val <- AIC(var_model)
-  bic_val <- BIC(var_model)
-  
-  summary_df <- rbind(summary_df, data.frame(
-    p = p,
-    stable = is_stable,
-    max_root = max_root,
-    serial_chisq = serial_chisq,
-    serial_p = serial_p,
-    arch_chisq = arch_chisq, 
-    arch_p = arch_p,
-    norm_stat = norm_stat,
-    norm_p = norm_p,
-    aic = aic_val,
-    bic = bic_val
-  ))
-}
+fmt_test <- function(stat, df, p) sprintf("%.2f (%d; %s)", stat, as.integer(df), fmt_p_tex(p))
 
 formatted_diagnostics <- data.frame(
-  Lags = summary_df$p,
-  Stable = ifelse(summary_df$stable, "Yes", "No"),
-  Max_Root = sprintf("%.3f", summary_df$max_root),
-  Serial_Test = sprintf("%.2f (%s)", summary_df$serial_chisq, summary_df$serial_p),
-  ARCH_Test = sprintf("%.2f (%s)", summary_df$arch_chisq, summary_df$arch_p),
-  Normality = sprintf("%.2f (%s)", summary_df$norm_stat, summary_df$norm_p),
-  AIC = sprintf("%.2f", summary_df$aic),
-  BIC = sprintf("%.2f", summary_df$bic)
+  Lags        = summary_df$p,
+  Stable      = ifelse(summary_df$stable, "Yes", "No"),
+  Max_Root    = sprintf("%.3f", summary_df$max_root),
+  Serial_Test = fmt_test(summary_df$serial_chisq, summary_df$serial_df, summary_df$serial_p),
+  ARCH_Test   = fmt_test(summary_df$arch_chisq, summary_df$arch_df, summary_df$arch_p),
+  Normality   = fmt_test(summary_df$norm_stat, summary_df$norm_df, summary_df$norm_p),
+  AIC         = sprintf("%.2f", summary_df$aic),
+  BIC         = sprintf("%.2f", summary_df$bic)
 )
-
-diagnostics_latex <- kable(formatted_diagnostics, 
-      format = "latex",
-      booktabs = TRUE,
-      col.names = c("Lags (p)", "Stable", "Max Root", 
-                    "Portmanteau test", 
-                    "ARCH test", "Normality", "AIC", "BIC"),
-      align = c("c", "c", "r", "r", "r", "r", "r"),
-      escape = FALSE)
-
-# Table S11: VAR diagnostics
-out <- file.path(dst, "diagnostics_table.tex")
-writeLines(as.character(diagnostics_latex), out)
-
 formatted_diagnostics
+
+save_tex(kable(formatted_diagnostics, format = "latex", booktabs = TRUE, row.names = FALSE,
+               col.names = c("Lags (p)", "Stable", "Max Root", "Portmanteau test",
+                             "ARCH test", "Normality", "AIC", "BIC"),
+               align = c("c", "c", "r", "r", "r", "r", "r", "r"), escape = FALSE),
+         "diagnostics_table")
 ```
 
-
-```{r}
-final_var_model <- VAR(data_I1, 
-                   p = 9, 
-                   type = "const",
-                   exogen = cbind(step1, step2, ts_news))
-
-var_summary <- data.frame(
-  Equation = character(),
-  R_squared = numeric(),
-  Adj_R_squared = numeric(),
-  Residual_SE = numeric(),
-  F_statistic = numeric(),
-  F_p_value = numeric()
-)
-
+```{r final-var}
+final_var_model <- VAR(data_I1, p = P, type = "const", exogen = exog)
 summary_obj <- summary(final_var_model)
 
-for(i in 1:3) {
-  eq_name <- names(summary_obj$varresult)[i]
-  eq_summary <- summary_obj$varresult[[i]]
-  
-  var_summary <- rbind(var_summary, data.frame(
-    Equation = eq_name,
-    R_squared = eq_summary$r.squared,
-    Adj_R_squared = eq_summary$adj.r.squared,
-    Residual_SE = eq_summary$sigma,
-    F_statistic = eq_summary$fstatistic[1],
-    F_p_value = pf(eq_summary$fstatistic[1], 
-                   eq_summary$fstatistic[2], 
-                   eq_summary$fstatistic[3], 
-                   lower.tail = FALSE)
-  ))
-}
-
-
-var_summary$Equation <- c("Misinformation", "Fear", "Anger")
-
-var_latex <- kable(var_summary,
-      format = "latex",
-      booktabs = TRUE,
-      digits = 3,
-      row.names=FALSE,
-      col.names = c("Equation", "$R^2$", "Adj. $R^2$", 
-                    "Residual SE", "F-statistic", "p-value"),
-      escape = FALSE)
-
-# Table S12: VAR model summary
-out <- file.path(dst, "var_summary_table.tex")
-writeLines(as.character(var_latex), out)
-
+var_summary <- map_dfr(endo, function(v) {
+  eq    <- summary_obj$varresult[[v]]
+  fstat <- unname(eq$fstatistic)   # value, numdf, dendf
+  tibble(Equation = LAB[[v]], R_squared = eq$r.squared, Adj_R_squared = eq$adj.r.squared,
+         Residual_SE = eq$sigma, F_statistic = fstat[1], df1 = fstat[2], df2 = fstat[3],
+         F_p_value = pf(fstat[1], fstat[2], fstat[3], lower.tail = FALSE))
+})
 var_summary
+
+var_formatted <- data.frame(
+  Equation      = var_summary$Equation,
+  R_squared     = sprintf("%.3f", var_summary$R_squared),
+  Adj_R_squared = sprintf("%.3f", var_summary$Adj_R_squared),
+  Residual_SE   = sprintf("%.3f", var_summary$Residual_SE),
+  F_statistic   = sprintf("%.2f", var_summary$F_statistic),
+  df            = sprintf("(%d, %d)", as.integer(var_summary$df1), as.integer(var_summary$df2)),
+  p_value       = fmt_p_tex(var_summary$F_p_value)
+)
+
+save_tex(kable(var_formatted, format = "latex", booktabs = TRUE, row.names = FALSE,
+               align = c("l", "r", "r", "r", "r", "c", "r"),
+               col.names = c("Equation", "$R^2$", "Adj. $R^2$", "Residual SE", "F", "df", "$p$"),
+               escape = FALSE),
+         "var_summary_table")
 ```
 
+## Granger causality
 
+```{r granger}
+# wild bootstrap keeps each day's residual size (heteroskedasticity) and only flips its sign
+granger_table <- map_dfr(endo, function(v) {
+  plain <- causality(final_var_model, cause = v)$Granger
+  wild  <- causality(final_var_model, cause = v, boot = TRUE, boot.runs = BOOT_RUNS)$Granger
+  tibble(cause = v, F = unname(plain$statistic),
+         df1 = unname(plain$parameter[1]), df2 = unname(plain$parameter[2]),
+         p_plain = plain$p.value, p_wild = wild$p.value)
+})
+print(granger_table)
 
-
-## Granger causality test
-
-```{r}
-gc_misinfo <- causality(final_var_model, cause = "ts_score")
-gc_fear <- causality(final_var_model, cause = "ts_fear")
-gc_anger <- causality(final_var_model, cause = "ts_anger")
-
-granger_table <- data.frame(
-  Cause = c("Misinformation", "Fear", "Anger"),
-  F_statistic = c(
-    gc_misinfo$Granger$statistic,
-    gc_fear$Granger$statistic,
-    gc_anger$Granger$statistic
-  ),
-  df1 = c(
-    gc_misinfo$Granger$parameter[1],
-    gc_fear$Granger$parameter[1],
-    gc_anger$Granger$parameter[1]
-  ),
-  df2 = c(
-    gc_misinfo$Granger$parameter[2],
-    gc_fear$Granger$parameter[2],
-    gc_anger$Granger$parameter[2]
-  ),
-  p_value = c(
-    gc_misinfo$Granger$p.value,
-    gc_fear$Granger$p.value,
-    gc_anger$Granger$p.value
-  )
-)
+# pairwise Granger tests (cause -> one response), Wald tests on the VAR coefficients
+pairwise_granger <- function(m, cause, response) {
+  eq   <- m$varresult[[response]]
+  b    <- coef(eq)
+  idx  <- grep(paste0("^", cause, "\\.l[0-9]+$"), names(b))
+  R    <- diag(length(b))[idx, , drop = FALSE]
+  W    <- t(R %*% b) %*% solve(R %*% vcov(eq) %*% t(R)) %*% (R %*% b)
+  Fval <- as.numeric(W) / length(idx)
+  tibble(cause = cause, response = response, F = Fval,
+         p = pf(Fval, length(idx), df.residual(eq), lower.tail = FALSE))
+}
+pairwise <- map_dfr(endo, function(cv) map_dfr(setdiff(endo, cv),
+                                               ~ pairwise_granger(final_var_model, cv, .x)))
+pairwise %>% mutate(F = round(F, 2), p = signif(p, 3))
 
 granger_formatted <- data.frame(
-  Hypothesis = c(
-    "Misinformation $\\rightarrow$ Fear, Anger",
-    "Fear $\\rightarrow$ Misinformation, Anger",
-    "Anger $\\rightarrow$ Misinformation, Fear"
-  ),
-  F_stat = sprintf("%.2f", granger_table$F_statistic),
-  df = sprintf("(%d, %d)", granger_table$df1, granger_table$df2),
-  p_value = ifelse(granger_table$p_value < 0.001, "$<$0.001",
-                   sprintf("%.3f", granger_table$p_value)),
-  stringsAsFactors = FALSE
+  Hypothesis = sapply(endo, function(v)
+    paste(LAB[[v]], "$\\rightarrow$", paste(lab[setdiff(endo, v)], collapse = ", "))),
+  F_stat = sprintf("%.2f", granger_table$F),
+  df     = sprintf("(%d, %d)", as.integer(granger_table$df1), as.integer(granger_table$df2)),
+  p_wild = fmt_p_tex(granger_table$p_wild)
 )
 
-granger_latex <- kable(granger_formatted,
-      format = "latex",
-      booktabs = TRUE,
-      row.names = FALSE,
-      align = c("l", "r", "c", "r", "l"),
-      col.names = c("Null Hypothesis ($H_0$: No Granger Causality)", 
-                    "F", "df", "p-value"),
-      escape = FALSE) 
-
-# Table S13: Granger causality tests
-out <- file.path(dst, "granger_table.tex")
-writeLines(as.character(granger_latex), out)
-
-print(granger_table)
+save_tex(kable(granger_formatted, format = "latex", booktabs = TRUE, row.names = FALSE,
+               align = c("l", "r", "c", "r"),
+               col.names = c("$H_0$: no Granger causality", "F", "df", "$p$ (bootstrap)"),
+               escape = FALSE),
+         "granger_table")
 ```
 
-All variables are interconnected and every predictor is significant but anger is the strongest in Granger-causing others. 
+## Impulse response functions
 
-Misinformation has lagged effects only.
-Fear and Anger move together (same-day effects), while misinformation operates with a lag (no same-day effect).
-
-## Impulse response function 
---> bootstrapping might take a while. 
-
-```{r}
-# Does misinfo affect fear and anger?
-irf_misinfo <- irf(final_var_model, 
-                   impulse = "ts_score", 
-                   n.ahead = 14,
-                   ortho = FALSE,
-                   boot = TRUE, 
-                   runs = 10000)
-plot(irf_misinfo)
+```{r irf}
+# non-orthogonalized IRFs for every impulse, 30 days, bootstrap CIs
+irfs <- setNames(lapply(endo, function(v)
+  irf(final_var_model, impulse = v, n.ahead = 30, ortho = FALSE,
+      boot = TRUE, runs = BOOT_RUNS)), endo)
 ```
 
-```{r}
-# Does fear affect anger?
-irf_fear <- irf(final_var_model, impulse = "ts_fear", 
-                n.ahead = 14, boot = TRUE, 
-                ortho=FALSE,
-                runs = 10000)
-plot(irf_fear)
+```{r shocks}
+var_resid <- residuals(final_var_model)
+resid_sd  <- apply(var_resid, 2, sd)
+resid_max <- apply(var_resid, 2, max)
+var_means <- colMeans(data_I1)
+
+# day of the maximum shock (residuals start after the first P lags)
+resid_days <- daily_summary$day[(P + 1):n]
+
+shock_table <- data.frame(
+  Shock = LAB,
+  Day   = format(resid_days[apply(var_resid[, endo], 2, which.max)], "%d %b %Y"),
+  Mean  = sprintf("%.1f\\%%", var_means[endo]),
+  pp    = sprintf("+%.1f", resid_max[endo]),
+  pct   = sprintf("+%.0f\\%%", 100 * resid_max[endo] / var_means[endo]),
+  sd    = sprintf("%.1f", resid_max[endo] / resid_sd[endo])
+)
+shock_table
+
+save_tex(kable(shock_table, format = "latex", booktabs = TRUE, row.names = FALSE,
+               align = c("l", "l", "c", "c", "c", "c"),
+               col.names = c("Shock", "Day", "Mean", "Shock (pp)",
+                             "Shock (\\% of mean)", "Shock (SD)"),
+               escape = FALSE),
+         "shock_table")
 ```
 
-```{r}
-# Does anger feed back to misinfo?
-irf_anger <- irf(final_var_model, 
-                 impulse = "ts_anger", 
-                 n.ahead = 14, boot = TRUE, 
-                 ortho=FALSE,
-                 runs = 10000)
-plot(irf_anger)
-```
-
-```{r}
-extract_irf_data <- function(irf_object, shock_name, response_var, shock_label, scale_factor) {
-  data.frame(
-    days = 0:(nrow(irf_object$irf[[shock_name]]) - 1),
-    response = irf_object$irf[[shock_name]][, response_var] * scale_factor,
-    lower = irf_object$Lower[[shock_name]][, response_var] * scale_factor,
-    upper = irf_object$Upper[[shock_name]][, response_var] * scale_factor,
-    shock = shock_label,
-    response_var = response_var
-  )
+```{r irf-data}
+# responses to the maximum observed shock, in pp, SD, or % of the response's mean
+extract_irf_data <- function(impulse, response, units = c("pp", "sd", "pct"), irf_list = irfs) {
+  units <- match.arg(units)
+  scale_r <- switch(units, pp = 1, sd = resid_sd[[response]],
+                    pct = var_means[[response]] / 100)
+  f <- resid_max[[impulse]] / scale_r
+  io <- irf_list[[impulse]]
+  # computed outside tibble(): inside it, the new column `response` would mask the argument
+  est <- io$irf[[impulse]][, response] * f
+  lo  <- io$Lower[[impulse]][, response] * f
+  hi  <- io$Upper[[impulse]][, response] * f
+  resp_name <- response
+  tibble(days = seq_along(est) - 1, response = est, lower = lo, upper = hi,
+         impulse_var = impulse, response_var = resp_name)
 }
 
+irf_units <- "pct"
+irf_all <- map_dfr(endo, function(i) map_dfr(endo, ~ extract_irf_data(i, .x, irf_units)))
 
-anger_data <- extract_irf_data(irf_anger, "ts_anger", "ts_score", "shock of anger", 10)
-fear_data <- extract_irf_data(irf_fear, "ts_fear", "ts_score", "shock of fear", 10)
-score_data <- extract_irf_data(irf_misinfo, "ts_score", "ts_score", "shock of misinfo", 10)
-score_response <- bind_rows(anger_data, fear_data, score_data)
+# peak cross-variable responses in pp, SD, and % of mean
+peak_table <- map_dfr(endo, function(i) map_dfr(endo, ~ extract_irf_data(i, .x, "pp"))) %>%
+  filter(impulse_var != response_var, days > 0) %>%
+  group_by(impulse_var, response_var) %>%
+  slice_max(abs(response), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    shock_in_sd       = unname(resid_max[impulse_var] / resid_sd[impulse_var]),
+    shock_pct_of_mean = 100 * unname(resid_max[impulse_var] / var_means[impulse_var]),
+    response_sd       = response / unname(resid_sd[response_var]),
+    response_pct      = 100 * response / unname(var_means[response_var]),
+    ci_pct            = sprintf("[%.1f, %.1f]",
+                                100 * lower / unname(var_means[response_var]),
+                                100 * upper / unname(var_means[response_var])),
+    significant       = lower > 0 | upper < 0
+  ) %>%
+  dplyr::select(impulse_var, response_var, days, shock_in_sd, shock_pct_of_mean,
+                response_pp = response, response_sd, response_pct, ci_pct, significant)
+print(peak_table, width = Inf)
 
-anger_data <- extract_irf_data(irf_anger, "ts_anger", "ts_anger", "shock of anger", 10)
-fear_data <- extract_irf_data(irf_fear, "ts_fear", "ts_anger", "shock of fear", 10)
-score_data <- extract_irf_data(irf_misinfo, "ts_score", "ts_anger", "shock of misinfo", 10)
-anger_response <- bind_rows(anger_data, fear_data, score_data)
-
-anger_data <- extract_irf_data(irf_anger, "ts_anger", "ts_fear", "shock of anger", 10)
-fear_data <- extract_irf_data(irf_fear, "ts_fear", "ts_fear", "shock of fear", 10)
-score_data <- extract_irf_data(irf_misinfo, "ts_score", "ts_fear", "shock of misinfo", 10)
-fear_response <- bind_rows(anger_data, fear_data, score_data)
+# days with significant cross-variable responses
+irf_all %>%
+  filter(impulse_var != response_var, lower > 0 | upper < 0) %>%
+  group_by(impulse_var, response_var) %>%
+  summarise(days = paste(days, collapse = ","),
+            min_pct = round(min(response), 1), max_pct = round(max(response), 1),
+            .groups = "drop")
 ```
 
-
-```{r}
-score_irf <- ggplot(score_response, 
-                    aes(x = days, y = response)) +
+```{r irf-plot, fig.height = 1.4 * length(endo) + 0.6}
+shock_levels <- paste("shock of", lab[c(paste0("ts_", EMOTIONS), "ts_score")])
+irf_facets <- function(d) d %>%
+  mutate(shock = factor(paste("shock of", lab[impulse_var]), levels = shock_levels),
+         resp  = factor(paste0(lab[response_var], " (%)"),
+                        levels = paste0(lab[endo], " (%)")))
+irf_plot <- irf_facets(irf_all) %>%
+  ggplot(aes(x = days, y = response)) +
   geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
   geom_ribbon(aes(ymin = lower, ymax = upper), fill = "gray70", alpha = 0.3) +
   geom_line(linewidth = 0.8) +
-  facet_wrap(~ shock, ncol = 3, scales = "free_y") + 
-  labs(x = NULL, 
-       y = "misinfo (%)") +
+  facet_grid(resp ~ shock, scales = "free_y", switch = "y") +
+  labs(x = "days after maximum shock", y = NULL) +
   theme_classic() +
   theme(
-    strip.background = element_rect(color = "black", fill = "gray95"),
-    strip.text = element_text(size = 10, hjust = 0.5),
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
-    axis.title.y = element_text(size = 10, margin = margin(r = 5)),
-    axis.text = element_text(size = 10),
-    plot.margin = margin(5, 5, 0, 5)
+    strip.background   = element_rect(color = "black", fill = "gray95"),
+    strip.placement    = "outside",
+    strip.background.y = element_blank(),
+    strip.text         = element_text(size = 9),
+    panel.border       = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.text          = element_text(size = 9)
   )
+irf_plot
 
-anger_irf <- ggplot(anger_response, aes(x = days, y = response)) +
-  geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "gray70", alpha = 0.3) +
-  geom_line(linewidth = 0.8) +
-  facet_wrap(~ shock, ncol = 3, scales = "free_y") +
-  labs(x = NULL,
-       y = "anger (%)") +
-  theme_classic() +
-  theme(
-    strip.background = element_blank(),  
-    strip.text = element_blank(),
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
-    axis.title.y = element_text(size = 10, margin = margin(r = 5)),
-    axis.text = element_text(size = 10),
-    plot.margin = margin(0, 5, 0, 5)
-  )
-
-fear_irf <- ggplot(fear_response, aes(x = days, y = response)) +
-  geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "gray70", alpha = 0.3) +
-  geom_line(linewidth = 0.8) +
-  facet_wrap(~ shock, ncol = 3, scales = "free_y") +
-  labs(x = "days after 10% shock", 
-       y = "response in fear (%)") +
-  theme_classic() +
-  theme(
-    strip.background = element_blank(),
-    strip.text = element_blank(),
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
-    axis.title = element_text(size = 10),
-    axis.title.y = element_text(margin = margin(r = 5)),
-    axis.text = element_text(size = 10),
-    plot.margin = margin(0, 5, 5, 5)
-  )
-
-
-irf_plot <- score_irf / anger_irf / fear_irf
-
-ggsave(file.path(dst, "irf_plot.pdf"),
-       plot = irf_plot,
-       width = 6.5, height = 6.5)
+ggsave(file.path(dst, paste0("figures/irf_plot", tag, ".pdf")), irf_plot,
+       width = 6.5, height = 1.4 * length(endo) + 0.6)
 ```
 
-### Cumulative IRF -> in 3b-boot_irf.R
+```{r irf-90d, fig.height = 1.4 * length(endo) + 0.6}
+# long horizon (SI): the same responses over 90 days, to show whether they decay
+irfs_90 <- setNames(lapply(endo, function(v)
+  irf(final_var_model, impulse = v, n.ahead = 90, ortho = FALSE,
+      boot = TRUE, runs = BOOT_RUNS)), endo)
+irf_all_90 <- map_dfr(endo, function(i)
+  map_dfr(endo, ~ extract_irf_data(i, .x, irf_units, irf_list = irfs_90)))
 
+# cross-variable responses (% of mean) on days 30, 60, 90
+irf_all_90 %>%
+  filter(impulse_var != response_var, days %in% c(30, 60, 90)) %>%
+  mutate(across(c(response, lower, upper), ~ round(.x, 2)),
+         significant = lower > 0 | upper < 0) %>%
+  print(n = Inf)
 
-### Variance Decomposition
-```{r}
-fevd_results <- fevd(final_var_model, n.ahead = 20)
+irf_plot_90 <- irf_plot %+% irf_facets(irf_all_90)
+irf_plot_90
 
-# Create table manually
-fevd_data <- data.frame(
-  Variable = rep(c("Misinformation", "Fear", "Anger"), each = 5),
-  Horizon = c(1, 3, 5, 7, 14),
-  Own = c(
-    # Misinformation at horizons 1, 5, 10, 20
-    fevd_results$ts_score[c(1, 3, 5, 7, 14), "ts_score"] * 100,
-    # Fear at horizons 1, 5, 10, 20
-    fevd_results$ts_fear[c(1, 3, 5, 7, 14), "ts_fear"] * 100,
-    # Anger at horizons 1, 5, 10, 20
-    fevd_results$ts_anger[c(1, 3, 5, 7, 14), "ts_anger"] * 100
-  ),
-  Misinformation = c(
-    # For Misinformation rows: NA (own variable)
-    rep(NA, 5),
-    # For Fear rows: contribution from misinformation
-    fevd_results$ts_fear[c(1, 3, 5, 7, 14), "ts_score"] * 100,
-    # For Anger rows: contribution from misinformation
-    fevd_results$ts_anger[c(1, 3, 5, 7, 14), "ts_score"] * 100
-  ),
-  Fear = c(
-    # For Misinformation rows: contribution from fear
-    fevd_results$ts_score[c(1, 3, 5, 7, 14), "ts_fear"] * 100,
-    # For Fear rows: NA (own variable)
-    rep(NA, 5),
-    # For Anger rows: contribution from fear
-    fevd_results$ts_anger[c(1, 3, 5, 7, 14), "ts_fear"] * 100
-  ),
-  Anger = c(
-    # For Misinformation rows: contribution from anger
-    fevd_results$ts_score[c(1, 3, 5, 7, 14), "ts_anger"] * 100,
-    # For Fear rows: contribution from anger
-    fevd_results$ts_fear[c(1, 3, 5, 7, 14), "ts_anger"] * 100,
-    # For Anger rows: NA (own variable)
-    rep(NA, 5)
-  )
+ggsave(file.path(dst, paste0("figures/irf_plot_90d", tag, ".pdf")), irf_plot_90,
+       width = 6.5, height = 1.4 * length(endo) + 0.6)
+```
+
+## Forecast error variance decomposition
+
+```{r fevd-bootstrap, cache=TRUE, cache.extra=list(LANG, THR, EMOTIONS, P, BOOT_RUNS, tools::md5sum(daily_file))}
+# residual bootstrap: resample residual rows (keeps the contemporaneous correlation),
+# rebuild the series recursively with the estimated coefficients and the original
+# exogenous variables, re-estimate the VAR, and compute the FEVD
+determine_fevd <- function(var_model, y, exogen, lags,
+                           horizons = c(1, 3, 7, 14, 30), boot_runs = 10000,
+                           cores = 1) {
+  endo_names <- colnames(y)
+  exog_names <- colnames(exogen)
+  K <- length(endo_names)
+  n_obs <- nrow(y)
+  max_horizon <- max(horizons)
+
+  # coefficient matrix: rows = equations, columns = regressors (y1.l1, y2.l1, ..., const, exog)
+  regressor_names <- c(paste0(rep(endo_names, times = lags), ".l", rep(1:lags, each = K)),
+                       "const", exog_names)
+  coef_mat <- t(sapply(endo_names, function(v) coef(var_model$varresult[[v]])[regressor_names]))
+
+  resids   <- scale(residuals(var_model), center = TRUE, scale = FALSE)
+  y_mat    <- as.matrix(y)
+  exog_mat <- as.matrix(exogen)
+  fevd_point <- fevd(var_model, n.ahead = max_horizon)
+
+  one_draw <- function(i) {
+    u_star <- resids[sample.int(nrow(resids), replace = TRUE), , drop = FALSE]
+    y_star <- y_mat
+    for (t in (lags + 1):n_obs) {
+      lagged <- as.vector(t(y_star[(t - 1):(t - lags), , drop = FALSE]))
+      y_star[t, ] <- coef_mat %*% c(lagged, 1, exog_mat[t, ]) + u_star[t - lags, ]
+    }
+    colnames(y_star) <- endo_names
+    var_star  <- VAR(y_star, p = lags, type = "const", exogen = exog_mat)
+    fevd_star <- fevd(var_star, n.ahead = max_horizon)
+    # array: horizon x shock x response
+    sapply(endo_names, function(resp) fevd_star[[resp]][horizons, endo_names, drop = FALSE],
+           simplify = "array")
+  }
+
+  RNGkind("L'Ecuyer-CMRG"); set.seed(636)
+  boot_array <- simplify2array(mclapply(1:boot_runs, one_draw, mc.cores = cores))
+
+  map_dfr(endo_names, function(resp) map_dfr(endo_names, function(shock) {
+    draws <- matrix(boot_array[, shock, resp, , drop = TRUE], nrow = length(horizons))
+    tibble(response = resp, shock = shock, horizon = horizons,
+           fevd = fevd_point[[resp]][horizons, shock] * 100,
+           boot_mean = rowMeans(draws) * 100,
+           boot_sd = apply(draws, 1, sd) * 100,
+           lower = apply(draws, 1, quantile, probs = 0.025) * 100,
+           upper = apply(draws, 1, quantile, probs = 0.975) * 100)
+  }))
+}
+
+fevd_boot <- determine_fevd(final_var_model, y = data_I1, exogen = exog, lags = P,
+                            boot_runs = BOOT_RUNS, cores = N_CORES)
+```
+
+```{r fevd-table}
+H <- c(1, 3, 7, 14, 30)
+# in determine_fevd(), `shock` inside tibble() refers to the recycled column, so the point
+# estimate is a matrix with identical columns; keep one (fixed here, not in the cached
+# chunk, so that the bootstrap is not rerun)
+if (is.matrix(fevd_boot$fevd)) {
+  stopifnot(all(abs(fevd_boot$fevd - fevd_boot$fevd[, 1]) < 1e-10))
+  fevd_boot$fevd <- fevd_boot$fevd[, 1]
+}
+fevd_data <- fevd_boot %>%
+  mutate(cell = sprintf("%.1f [%.1f, %.1f]", fevd, lower, upper),
+         col  = ifelse(response == shock, "Own", LAB[shock])) %>%
+  dplyr::select(response, horizon, col, cell) %>%
+  pivot_wider(names_from = col, values_from = cell, values_fill = "—") %>%
+  mutate(response = factor(response, levels = endo)) %>%
+  arrange(response, horizon) %>%
+  mutate(Variable = LAB[as.character(response)]) %>%
+  dplyr::select(Variable, Horizon = horizon, Own, all_of(unname(LAB)))
+fevd_data
+
+# compact view: share of each variable's forecast error variance from the other variables
+fevd_boot %>% filter(response != shock, horizon %in% c(14, 30)) %>%
+  mutate(across(c(fevd, lower, upper), ~ round(.x, 1))) %>%
+  arrange(response, shock, horizon)
+
+save_tex(kable(fevd_data, format = "latex", booktabs = TRUE, row.names = FALSE,
+               align = c("l", rep("c", ncol(fevd_data) - 1)), escape = FALSE),
+         "fevd_table")
+```
+
+## Robustness checks (SI)
+
+Refits the main specification (VAR in levels, constant, structural break dummies and
+news sharing as exogenous variables) for:
+
+- `main`: German and English, score >= 0.65, fear and anger (lag order P)
+- `with disgust`: as main, with disgust as a third emotion (response letter R3.8);
+  disgust is ordered last, so it cannot change the contemporaneous ordering of the main variables
+- `German only`, `all languages`: emotion scores of German tweets only / all tweets
+- `third quartile`: emotion present if the score is above its third quartile
+  (as in the first submission), denominator classified tweets
+- `threshold 0.5`: emotion present if the score is >= 0.5
+- `HQ lag order`: main specification with the lag order selected by HQ (more lags than SC),
+  because the residuals at the SC lag order remain serially correlated
+- `anger before fear`: main specification with anger ordered before fear; the IRFs are
+  non-orthogonalized and do not change, but the FEVD depends on the ordering
+- `first submission`: all languages, third quartile, denominator all tweets,
+  fear and anger, p = 9; must reproduce the first-submission results
+- `3-day rolling`: trailing 3-day means of all series; smoothing induces serial
+  correlation, so the lag order is re-selected (SC)
+- `cutoff < 50`: untrustworthy share with a NewsGuard cutoff of 50 instead of 60;
+  `cutoff < 60 (rated)` is the reference with the same denominator (rated links)
+
+Each variant is fitted at P and at its own SC lag order where they differ.
+Bootstrap runs are lower than in the main analysis (`BOOT_ROB`).
+
+```{r robustness-function}
+fit_var_variant <- function(df, label, emotions = EMOTIONS, p = NULL, boot_runs = BOOT_ROB) {
+  ev <- paste0("ts_", emotions)
+  y  <- as.matrix(data.frame(ts_score = df$prop_trust,
+                             setNames(df[paste0("prop_", emotions)], ev)))
+  ex <- cbind(step1   = as.numeric(df$day >= BREAK1),
+              step2   = as.numeric(df$day >= BREAK2),
+              ts_news = df$prop_news)
+  p_sc <- VARselect(y, lag.max = 14, type = "const", exogen = ex)$selection[["SC(n)"]]
+  if (is.null(p)) p <- p_sc
+  # p and ex are inlined into the stored call: irf(boot = TRUE) re-estimates the model with
+  # update(), which evaluates the call outside this function, where p and ex do not exist
+  m <- eval(bquote(VAR(y, p = .(p), type = "const", exogen = .(ex))))
+  vars_m <- colnames(y)
+
+  diag <- tibble(variant = label, p = p, p_sc = p_sc, n_days = nrow(df),
+                 max_root = max(roots(m)),
+                 serial_p = serial.test(m, lags.pt = 16, type = "PT.asymptotic")$serial$p.value)
+
+  granger <- map_dfr(vars_m, function(v) {
+    g <- causality(m, cause = v)$Granger
+    tibble(cause = v, F = unname(g$statistic), p_value = g$p.value)
+  }) %>% mutate(variant = label)
+
+  # IRFs scaled as in the main analysis: maximum observed shock,
+  # response in % of the response variable's mean
+  shock <- apply(residuals(m), 2, max)
+  means <- colMeans(y)
+  pairs <- expand_grid(impulse = vars_m, response = vars_m) %>% filter(impulse != response)
+  irf_tab <- pmap_dfr(pairs, function(impulse, response) {
+    ir  <- irf(m, impulse = impulse, response = response, n.ahead = 30,
+               ortho = FALSE, boot = TRUE, runs = boot_runs)
+    f   <- shock[[impulse]] / (means[[response]] / 100)
+    est <- ir$irf[[impulse]][, response] * f
+    lo  <- ir$Lower[[impulse]][, response] * f
+    hi  <- ir$Upper[[impulse]][, response] * f
+    sig <- (lo > 0) | (hi < 0)
+    tibble(variant = label, impulse = impulse, response = response,
+           day2_pct = est[3], day2_ci = sprintf("[%.1f, %.1f]", lo[3], hi[3]),  # rows start at day 0
+           peak_pct = est[which.max(abs(est))], peak_day = which.max(abs(est)) - 1,
+           sig_days = paste(which(sig) - 1, collapse = ","))
+  })
+
+  fe <- fevd(m, n.ahead = 30)
+  fevd_tab <- map_dfr(vars_m, function(r) tibble(
+    variant = label, response = r, shock = vars_m, fevd30 = fe[[r]][30, vars_m]))
+
+  list(model = m, diag = diag, granger = granger, irf = irf_tab, fevd = fevd_tab)
+}
+```
+
+```{r robustness-fit, cache=TRUE, cache.extra=list(EMOTIONS, P, BOOT_ROB, tools::md5sum(file.path(src, paste0("Austria-Panel-Daily-", c("de_en", "de", "all"), ".csv"))))}
+thr_file <- read.csv(file.path(src, "Austria-Panel-Daily-Thresholds.csv")) %>%
+  dplyr::select(day, n_rated, N_50, N_60)
+d_de_en <- read_daily("de_en")
+d_de    <- read_daily("de")
+d_all   <- read_daily("all")
+d_cut   <- left_join(d_de_en, thr_file, by = "day")
+emo_fad <- c(EMOTIONS, "disgust")
+P_HQ    <- as.integer(sel$selection[["HQ(n)"]])   # lag order by HQ (chunk lag-selection)
+
+variants <- list(
+  list("main",                prep_daily(d_de_en),                     EMOTIONS, P),
+  list("with disgust",        prep_daily(d_de_en, emotions = emo_fad), emo_fad,  P),
+  list("with disgust (SC)",   prep_daily(d_de_en, emotions = emo_fad), emo_fad,  NULL),
+  list("German only",         prep_daily(d_de),                        EMOTIONS, P),
+  list("German only (SC)",    prep_daily(d_de),                        EMOTIONS, NULL),
+  list("all languages",       prep_daily(d_all),                       EMOTIONS, P),
+  list("all languages (SC)",  prep_daily(d_all),                       EMOTIONS, NULL),
+  list("third quartile",      prep_daily(d_de_en, thr = "q3"),         EMOTIONS, P),
+  list("third quartile (SC)", prep_daily(d_de_en, thr = "q3"),         EMOTIONS, NULL),
+  list("threshold 0.5",       prep_daily(d_de_en, thr = "05"),         EMOTIONS, P),
+  list("threshold 0.5 (SC)",  prep_daily(d_de_en, thr = "05"),         EMOTIONS, NULL),
+  list(paste0("HQ lag order (p = ", P_HQ, ")"), prep_daily(d_de_en),   EMOTIONS, P_HQ),
+  list("anger before fear",   prep_daily(d_de_en),                     rev(EMOTIONS), P),
+  list("first submission (p = 9)",
+       prep_daily(d_all, thr = "q3", denom = "tweet_count", emotions = c("fear", "anger")),
+       c("fear", "anger"), 9),
+  list("3-day rolling (SC)",  prep_daily(d_de_en, smooth_k = 3),       EMOTIONS, NULL),
+  list("cutoff < 60 (rated)", prep_daily(d_cut, cutoff = 60),          EMOTIONS, P),
+  list("cutoff < 50",         prep_daily(d_cut, cutoff = 50),          EMOTIONS, P)
 )
 
-# Format
-fevd_data$Own <- sprintf("%.1f", fevd_data$Own)
-fevd_data$Misinformation <- ifelse(is.na(fevd_data$Misinformation), 
-                                   "—", 
-                                   sprintf("%.1f", fevd_data$Misinformation))
-fevd_data$Fear <- ifelse(is.na(fevd_data$Fear), 
-                         "—", 
-                         sprintf("%.1f", fevd_data$Fear))
-fevd_data$Anger <- ifelse(is.na(fevd_data$Anger), 
-                          "—", 
-                          sprintf("%.1f", fevd_data$Anger))
-
-
-fevd_latex <- kable(fevd_data,
-      format = "latex",
-      booktabs = TRUE,
-      row.names = FALSE,
-      align = c("l", "c", "c", "c", "c"),
-      col.names = c("Variable", "Horizon", "Own",
-                    "Misinformation", "Fear", "Anger"),
-      escape = FALSE)
-
-# Table S14: Variance decomposition (FEVD)
-out <- file.path(dst, "fevd_table.tex")
-writeLines(as.character(fevd_latex), out)
+rob <- setNames(lapply(variants, function(v)
+  fit_var_variant(v[[2]], v[[1]], emotions = v[[3]], p = v[[4]])),
+  sapply(variants, `[[`, 1))
 ```
 
-## Run all of the above
+```{r robustness-results}
+# "main" must match the main analysis above; "first submission" must reproduce
+# the first-submission results (Granger, IRF anger -> untrustworthy, FEVD)
+bind_rows(map(rob, "diag"))
+bind_rows(map(rob, "granger")) %>%
+  mutate(p_value = signif(p_value, 3)) %>%
+  pivot_wider(id_cols = variant, names_from = cause, values_from = c(F, p_value))
+bind_rows(map(rob, "irf")) %>% arrange(impulse, response, variant) %>% print(n = Inf)
+bind_rows(map(rob, "fevd")) %>% filter(response != shock) %>%
+  mutate(fevd30 = round(100 * fevd30, 1)) %>%
+  pivot_wider(id_cols = variant, names_from = c(response, shock), values_from = fevd30,
+              names_sep = "<-")
 
-```{r}
-# run all the above code
+# agreement of the emotion series across language sets and thresholds (levels and daily changes)
+emo_cmp <- map_dfr(EMOTIONS, function(e) {
+  x <- tibble(de_en = prep_daily(d_de_en)[[paste0("prop_", e)]],
+              de    = prep_daily(d_de)[[paste0("prop_", e)]],
+              all   = prep_daily(d_all)[[paste0("prop_", e)]],
+              q3    = prep_daily(d_de_en, thr = "q3")[[paste0("prop_", e)]],
+              t05   = prep_daily(d_de_en, thr = "05")[[paste0("prop_", e)]])
+  tibble(emotion = e,
+         r_de = cor(x$de_en, x$de), r_all = cor(x$de_en, x$all), r_q3 = cor(x$de_en, x$q3),
+         r_de_diff = cor(diff(x$de_en), diff(x$de)), r_all_diff = cor(diff(x$de_en), diff(x$all)),
+         r_q3_diff = cor(diff(x$de_en), diff(x$q3)),
+         r_05 = cor(x$de_en, x$t05), r_05_diff = cor(diff(x$de_en), diff(x$t05)))
+})
+emo_cmp %>% mutate(across(where(is.numeric), ~ round(.x, 2)))
+```
+
+```{r robustness-disgust}
+# Disgust as robustness check (response letter R3.8):
+# (1) does disgust Granger-cause untrustworthy news or explain its variance?
+# (2) does adding disgust change the anger and fear results of the main model?
+wd <- rob[["with disgust"]]
+wd$granger %>% filter(cause == "ts_disgust")
+wd$irf %>% filter(impulse == "ts_disgust" | response == "ts_disgust")
+wd$fevd %>% filter(shock == "ts_disgust" | response == "ts_disgust", response != shock) %>%
+  mutate(fevd30 = round(100 * fevd30, 1))
+# main vs. with disgust: IRFs and FEVD among untrustworthy news, fear, and anger
+main_vars <- paste0("ts_", c("score", EMOTIONS))
+bind_rows(rob[["main"]]$irf, wd$irf) %>%
+  filter(impulse %in% main_vars, response %in% main_vars) %>%
+  dplyr::select(variant, impulse, response, day2_pct, day2_ci, peak_pct, peak_day) %>%
+  arrange(impulse, response, variant) %>% print(n = Inf)
+bind_rows(rob[["main"]]$fevd, wd$fevd) %>%
+  filter(response %in% main_vars, shock %in% main_vars, response != shock) %>%
+  mutate(fevd30 = round(100 * fevd30, 1)) %>%
+  pivot_wider(id_cols = c(response, shock), names_from = variant, values_from = fevd30)
+```
+
+```{r robustness-table}
+# compact SI table: key cross-variable results per variant
+key_irf <- bind_rows(map(rob, "irf")) %>%
+  filter(response == "ts_score", impulse == "ts_anger") %>%
+  dplyr::select(variant, anger_to_untrust_day2 = day2_pct, ci = day2_ci)
+key_fevd <- bind_rows(map(rob, "fevd")) %>%
+  filter(response == "ts_score", shock != "ts_score") %>%
+  mutate(shock = sub("ts_", "", shock), fevd30 = sprintf("%.1f%%", 100 * fevd30)) %>%
+  pivot_wider(id_cols = variant, names_from = shock, values_from = fevd30,
+              names_prefix = "fevd_untrust_", values_fill = "—")
+rob_table <- key_irf %>%
+  left_join(key_fevd, by = "variant") %>%
+  left_join(bind_rows(map(rob, "diag")) %>% dplyr::select(variant, p, max_root, serial_p),
+            by = "variant") %>%
+  mutate(anger_to_untrust_day2 = sprintf("%.1f%%", anger_to_untrust_day2),
+         max_root = sprintf("%.3f", max_root),
+         serial_p = fmt_p_tex(serial_p))
+rob_table
+
+fevd_cols <- grep("^fevd_untrust_", names(rob_table), value = TRUE)
+# escape % for LaTeX (an unescaped % starts a comment)
+rob_table_tex <- rob_table %>% mutate(across(where(is.character), ~ gsub("%", "\\%", .x, fixed = TRUE)))
+save_tex(kable(rob_table_tex, format = "latex", booktabs = TRUE, row.names = FALSE,
+               col.names = c("Variant", "Anger $\\rightarrow$ untrustworthy (day 2)", "95\\% CI",
+                             paste("FEVD untrustworthy:", sub("fevd_untrust_", "", fevd_cols)),
+                             "Lags", "Max. root", "Serial corr. $p$"),
+               escape = FALSE),
+         "var_robustness_table")
 ```

@@ -1,14 +1,10 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Analyse domain trustworthiness distribution and changes over time.
-#         Focuses on June–September 2022 period.
-# Input:  data/Austria-Panel-Tweets-Domains-Change-2022.csv.gz
-#         data/Austria-Panel-Daily-Hashtags.csv
-# Output: ./domains/domains_classification_prop.png
-#         ./domains/domains_classification_raw.png / .pdf
-#         ./domains/untrustworthy_domains_spikes.png
-#         ./domains/top_hashtags_on_spike_days.csv
-#         output/figures/domains_classification_prop.pdf
-#         output/figures/untrustworthy_domains_spikes.pdf
+<!--
+Task:   Trustworthiness of the shared domains and its change in June-September 2022.
+Input:  data/Austria-Panel-Tweets-Domains-Change-2022.csv.gz (not released)
+        data/Austria-Panel-Daily-Hashtags.csv (not released)
+Output: output/figures/domains_classification_prop.pdf, domains_classification_raw.pdf, untrustworthy_domains_spikes.pdf
+        scripts/analysis/domains/*.png, top_hashtags_on_spike_days.csv
+Run:    As R Markdown or in terminal as Rscript -e 'rmarkdown::render("15-analyze_domains.Rmd")'-->
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, 
@@ -29,6 +25,7 @@ library(kableExtra)
 ```{r paths}
 src <- "../../data"
 dst <- "../../output"
+dir.create(file.path(dst, "figures"), recursive = TRUE, showWarnings = FALSE)
 ```
 
 ```{r custom plots}
@@ -154,7 +151,7 @@ p_proportions <- ggplot(stacked_data_daily, aes(x = day, y = n_domains, fill = c
   ) +
   custom_plot()
 
-ggsave(file.path(dst,"domains_classification_prop.pdf"), 
+ggsave(file.path(dst, "figures/domains_classification_prop.pdf"), 
        plot = p_proportions, 
        width = 6.5, height = 3)
 ```
@@ -178,7 +175,7 @@ p_raw <- ggplot(stacked_data_daily, aes(x = day, y = n_domains, fill = classific
   custom_plot()
 
 #save as pdf
-ggsave(file.path(dst, "domains_classification_raw.pdf"),
+ggsave(file.path(dst, "figures/domains_classification_raw.pdf"),
        plot = p_raw, 
        width = 6.5, height = 3)
 ```
@@ -208,7 +205,7 @@ p_spikes <- ggplot(daily_totals, aes(x = day, y = total_untrustworthy)) +
   labs(x = "time", y = "untrustworthy domains\n shared (#)") +
   custom_plot()
 
-ggsave(file.path(dst, "untrustworthy_domains_spikes.pdf"),
+ggsave(file.path(dst, "figures/untrustworthy_domains_spikes.pdf"),
          plot = p_spikes, 
          width = 6.5, height = 3)
 ```

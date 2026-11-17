@@ -1,11 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Strip identifier columns from the tweet file (primary de-identification step).
-#         Processes in 20M-row chunks for memory efficiency.
-#         Dropped columns: username, verified, followers_count, following_count, tweet_count, location, geo_location
-# Input:  <DATA_DIR>/Austria-Panel-Tweets.csv.gz
-#         <DATA_DIR>/dtypes.pkl
-# Output: <DATA_DIR>/Austria-Panel-Tweets.csv.gz
-# Usage:  python 7-remove_user_columns.py <DATA_DIR>
+# Task:   Remove user columns (username, follower counts, location, ...) from the tweet file.
+# Input:  data/Austria-Panel-Tweets.csv.gz (not released)
+#         data/dtypes.pkl
+# Output: data/Austria-Panel-Tweets.csv.gz (overwritten)
+# Run:    python 7-remove_user_columns.py ../../data
 
 import pandas as pd
 import sys
@@ -16,7 +13,7 @@ import os
 import tempfile
 from tqdm import tqdm
 
-src = sys.argv[1] # /misinfo-panel-austria/data
+src = sys.argv[1] # <DATA_DIR>
 file = "Austria-Panel-Tweets.csv.gz"
 out = join(src,"Austria-Panel-Tweets.csv.gz")
 
