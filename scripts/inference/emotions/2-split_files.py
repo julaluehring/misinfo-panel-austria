@@ -1,8 +1,7 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Split the cleaned text file into 30M-row chunks for parallel GPU inference.
-# Input:  <DATA_DIR>/emotions/Austria-Panel-Text.csv.gz  (output of 1-prepare_text.py)
-# Output: <DATA_DIR>/split_files/Austria-Panel-Text_*.csv.gz  (one per chunk)
-# Usage:  python 2-split_files.py <DATA_DIR>
+# Task:   Split the cleaned text into 30M-row chunks for GPU inference.
+# Input:  data/emotions/Austria-Panel-Text.csv.gz (not released)
+# Output: data/emotions/split_files/*.csv.gz
+# Run:    python 2-split_files.py ../../../data
 
 import pandas as pd
 import os

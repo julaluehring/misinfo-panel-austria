@@ -1,13 +1,9 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Build the full reply network from the tweet dataset.
-#         Classifies edges as internal (both users in sample), outgoing, or incoming.
-# Input:  <DATA_DIR>/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz
-#         <DATA_DIR>/Austria-Panel-Users-Daily.csv.gz
-# Output: <DATA_DIR>/Austria-Panel-Network-Edges.csv.gz
-#         <DATA_DIR>/Austria-Panel-Network-Nodes.csv.gz
-#         <DATA_DIR>/users/reply_analysis_summary.csv
-#         <DATA_DIR>/users/top_replied_to_users.csv
-# Usage:  python 12a-pull_replies.py <DATA_DIR>
+# Task:   Build the reply network (replies within, into and out of the sample).
+# Input:  data/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz (not released)
+#         data/Austria-Panel-Users-Daily.csv.gz
+# Output: data/Austria-Panel-Network-{Edges,Nodes}.csv.gz (not released)
+#         data/users/reply_analysis_summary.csv, top_replied_to_users.csv
+# Run:    python 12a-pull_replies.py ../../data
 
 import polars as pl
 import sys

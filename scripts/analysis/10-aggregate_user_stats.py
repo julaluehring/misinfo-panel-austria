@@ -1,12 +1,10 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Compute per-user summary statistics across the full observation period:
-#         activity dates, tweet volume, mean trustworthiness, mean emotion scores,
-#         and account-level metadata (followers, following, account age).
-# Input:  <DATA_DIR>/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz
-#         <DATA_DIR>/emotions/emotion_inference.csv.gz
-#         <DATA_DIR>/authors_filtered.csv
-# Output: <DATA_DIR>/Austria-Panel-User-Statistics.csv
-# Usage:  python 10-aggregate_user_stats.py <DATA_DIR>
+# Task:   Per-user summary statistics (activity period, tweet counts, mean trustworthiness and
+#         emotions, account data).
+# Input:  data/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz (not released)
+#         data/emotions/emotion_inference.csv.gz (not released)
+#         data/authors_filtered.csv
+# Output: data/Austria-Panel-User-Statistics.csv
+# Run:    python 10-aggregate_user_stats.py ../../data
 
 import polars as pl
 import pandas as pd

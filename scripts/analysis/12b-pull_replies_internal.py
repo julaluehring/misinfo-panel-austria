@@ -1,10 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Build the internal reply network (edges only between users within the sample).
-# Input:  <DATA_DIR>/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz
-#         <DATA_DIR>/Austria-Panel-Users-Daily.csv.gz
-# Output: <DATA_DIR>/Austria-Panel-Network-Edges-Internal.csv
-#         <DATA_DIR>/Austria-Panel-Network-Nodes-Internal.csv
-# Usage:  python 12b-pull_replies_internal.py <DATA_DIR>
+# Task:   Build the internal reply network (replies between users in the sample).
+# Input:  data/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz (not released)
+#         data/Austria-Panel-Users-Daily.csv.gz
+# Output: data/Austria-Panel-Network-{Edges,Nodes}-Internal.csv (not released)
+# Run:    python 12b-pull_replies_internal.py ../../data
 
 import polars as pl
 import sys

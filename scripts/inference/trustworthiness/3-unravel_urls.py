@@ -1,9 +1,7 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Expand shortened URLs to their final destination using async HTTP requests.
-# Input:  <DATA_DIR>/urls/shortened_urls_r2.csv.gz  (output of 1_extract_urls.py)
-# Output: <DATA_DIR>/urls/unraveled_*.csv.gz  (per-batch expanded URL files)
-# Usage:  python 3_unravel_urls.py <args>
-# Author: Jana Lasser
+# Task:   Expand shortened URLs to their final destination (async HTTP requests, in batches).
+# Input:  <url_list> (shortened URLs from 2-remove_platform_links.ipynb)
+# Output: <destination>/unraveled_urls_<i>.csv.gz
+# Run:    python 3-unravel_urls.py <url_list> -dst <destination>   (see --help for options)
 
 import argparse
 import pandas as pd

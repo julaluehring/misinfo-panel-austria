@@ -1,17 +1,15 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Describe and summarise the univariate time series; compute proportions
-#         and test for stationarity. Creates prop_bias = (count_right + count_left) / tweet_count.
-#         Detects outliers in tweet count and saves them for downstream hashtag analysis.
-# Input:  DATA_DIR/Austria-Panel-Daily.csv
-# Output: OUTPUT_DIR/score_intervention.pdf
-#         DATA_DIR/Austria-Panel-Count-Outliers.csv  (input for 16b-analyze_hashtags.Rmd)
+<!--
+Task:   Describe the daily time series: stationarity tests, outlier detection, ARIMA models and
+        the intervention analysis of untrustworthy news.
+Input:  data/Austria-Panel-Daily-de_en.csv
+        data/Austria-Panel-Daily-Hashtags.csv (not released; the outlier table is skipped without it)
+Output: output/tables/arima_{count,news,anger,fear}.tex, score_intervention.tex, outliers.tex
+        output/figures/score_intervention.pdf
+Run:    As R Markdown or in terminal as Rscript -e 'rmarkdown::render("2-describe_time_series.Rmd")'   # variants: LANG, DISGUST in the parameters chunk
+-->
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE,
-                      fig.width = 6, 
-                      fig.height = 3,
-                      dpi=300)
-
+knitr::opts_chunk$set(echo = TRUE)
 options(scipen=999)
 ```
 
@@ -24,17 +22,22 @@ library(patchwork)
 library(forecast)
 library(tseries)
 library(TSA)
+library(urca)
 library(lmtest)
 library(tsoutliers)
 library(fracdiff)
-library(urca)
 library(kableExtra)
 ```
 
 ```{r paths}
 src <- "../../data"
 dst <- "../../output"
-dir.create(dst, recursive = TRUE, showWarnings = FALSE)
+for (d in c("figures", "tables")) dir.create(file.path(dst, d), recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r parameters}
+LANG <- "de_en"   # de_en (main), de, all
+DISGUST <- FALSE  # FALSE (main), TRUE (robustness: disgust ARIMA and outliers; validation failed)
 ```
 
 ```{r custom plots}
@@ -49,12 +52,14 @@ custom_plot <- function() {
       legend.text  = element_text(size = 11)
     )
 }
+
+knitr::opts_chunk$set(fig.width = 6, fig.height = 3)
 ```
 
 # Exploration of time series data
 
 ```{r}
-daily_summary <- read.csv(file.path(src,"Austria-Panel-Daily.csv"))
+daily_summary <- read.csv(file.path(src, paste0("Austria-Panel-Daily-", LANG, ".csv")))
 head(daily_summary, 2)
 ```
 
@@ -80,8 +85,9 @@ daily_summary <- daily_summary %>%
   mutate(
     prop_news = (count_ng_domains / tweet_count) * 100,
     prop_misinfo = ((count_caution + count_max_caution) / tweet_count) * 100,
-    prop_anger = (count_anger / tweet_count) * 100,
-    prop_fear = (count_fear / tweet_count) * 100,
+    prop_anger = (count_anger_065 / n_scored) * 100,
+    prop_fear = (count_fear_065 / n_scored) * 100,
+    prop_disgust = (count_disgust_065 / n_scored) * 100,
     prop_right = (count_right / tweet_count) * 100,
     prop_left = (count_left / tweet_count)*100,
     prop_bias = ((count_right + count_left) / tweet_count)*100
@@ -89,271 +95,15 @@ daily_summary <- daily_summary %>%
 ```
 
 
-```{r}
-proportions <- c("prop_news", "prop_misinfo", "prop_anger", "prop_fear", "prop_right", "prop_left")
-summary(daily_summary[, proportions])
-```
 
-```{r, fig.width=6, fig.height=6}
-pdf(file.path(dst, "vars_histograms.pdf"), width = 8, height = 6)
-par(mfrow = c(2,3), 
-    cex.main = 1.5,    
-    cex.lab = 1.3,    
-    cex.axis = 1.2) 
-
-for (p in proportions) {
-  var_mean <- mean(daily_summary[[p]], na.rm = TRUE)
-  
-  hist(daily_summary[[p]], 
-       main = paste(""),
-       xlab = p,
-       ylab = "",
-       col = "lightblue",
-       border = "black")
-  abline(v = var_mean, col = "red", lwd = 2)
-}
-dev.off()
-
-par(mfrow = c(1, 1))
-```
-
-## Daily time series plots for supplementary materials
-```{r}
-p_count <- ggplot(daily_summary, aes(x = day, y = tweet_count)) +
-  geom_line() +
-  custom_plot()+
-  labs(tag="a", y="# tweets")+
-  theme(plot.tag = element_text(size = 14, face = "bold"))
-
-
-p_news <- ggplot(daily_summary, aes(x = day, y = count_ng_domains)) +
-  geom_line() +
-  custom_plot()+
-  labs(tag="b", y="# news links")+
-  theme(plot.tag = element_text(size = 14, face = "bold"))
-
-desc_daily <- (p_count / p_news)
-
-ggsave(file.path(dst, "desc_daily.pdf"), 
-          desc_daily, 
-          width = 9, height = 4.5)
-```
-
-
-```{r}
-p_score <- ggplot(daily_summary, aes(x = day, y = mean_score)) +
-  geom_line() +
-  custom_plot()+
-  labs(tag="a", y="NewsGuard\n score")+
-  theme(plot.tag = element_text(size = 14, face = "bold"))
-
-p_untrust <- ggplot(daily_summary, aes(x = day, y = prop_misinfo)) +
-  geom_line() +
-  custom_plot()+
-  labs(tag="b", y="untrustworthy\n links (%)")+
-  theme(plot.tag = element_text(size = 14, face = "bold"))
-
-trustworthiness_daily <- (p_score / p_untrust)
-
-ggsave(file.path(dst, "trustworthiness_daily.pdf"), 
-          trustworthiness_daily, 
-          width = 9, height = 4.5)
-```
-
-```{r}
-p_anger <- ggplot(daily_summary, 
-            aes(x = day, y = prop_anger)) +
-  geom_line() +
-  custom_plot()+
-  labs(tag="a", y="angry tweets (%)")+
-  theme(plot.tag = element_text(size = 14, face = "bold"))
-
-p_fear<- ggplot(daily_summary, 
-                aes(x = day, y = prop_fear)) +
-  geom_line() +
-  custom_plot()+
-  labs(tag="b", y="fearful tweets (%)")+
-  theme(plot.tag = element_text(size = 14, face = "bold"))
-
-emotions_daily <- (p_anger / p_fear)
-
-ggsave(file.path(dst, "emotions_daily.pdf"), 
-          emotions_daily, 
-          width = 9, height = 3)
-```
-
-## Weekly averages
-```{r}
-# summarize per week to visualize
-daily_summary <- daily_summary%>%
-  mutate(
-    count_trustworthy = count_exceptions + count_generally_credible + count_high_credibility,
-    count_untrustworthy = count_max_caution + count_caution
-  )
-
-weekly_summary <- daily_summary %>%
-dplyr:::select(day, tweet_count, count_ng_domains, 
-               count_trustworthy, count_untrustworthy,
-               mean_score, mean_anger, mean_fear) %>%
-  mutate(week = floor_date(day, "week")) %>%  # Create week column
-  group_by(week) %>%
-  summarise(
-    across(c(tweet_count, count_ng_domains, count_trustworthy, count_untrustworthy), sum, na.rm = TRUE),
-    across(c(mean_score, mean_anger, mean_fear), mean, na.rm = TRUE),
-    .groups = 'drop'
-  )
-
-```
-
-```{r}
-domestic <- "gray42"
-global <- "black"
-
-events <- data.frame(
-  date = as.Date(c("2019-05-17", 
-                   "2020-03-12", 
-                   "2020-11-02", 
-                   "2021-01-06", 
-                   "2021-10-09", 
-                   "2022-02-24", 
-                   "2022-10-21")),
-  event = c("Ibiza scandal",  
-            "COVID-19 lockdown",
-            "Vienna attack",
-            "Capitol storming", 
-            "Advertisement scandal",
-            "Russian invasion\n of Ukraine",
-            "Woman, Life,\nFreedom protests"),
-  color = c(domestic, domestic, domestic, global, domestic, global, global),
-  linetype = c("dashed", "dashed", "dashed", "dotted", "dashed", "dotted", "dotted")
-)
-
-```
-
-```{r}
-max_tweets <- max(weekly_summary$tweet_count, na.rm = TRUE)
-
-tweets_plot <- ggplot(data=weekly_summary, 
-                      aes(x = week, 
-                          y = tweet_count)) +
-  geom_line(linewidth = 0.9) +
-  geom_vline(data=events, 
-             aes(xintercept = date), 
-             color = events$color, 
-             linetype = events$linetype,
-             alpha = 0.9) +
-  ggrepel:::geom_text_repel(
-                  data=events, 
-                  aes(x = date-50, 
-                      y = max_tweets * 1.02, 
-                      label = event),
-                  color = events$color, 
-                  size = 2.88,
-                  hjust=0, 
-                  direction = "y", 
-                  nudge_x=0,
-                  lineheight=0.7,
-                  force=3, 
-                  ylim = c(max_tweets * 0.95, 
-                           max_tweets * 1.45),  
-                  segment.color = "transparent") + 
-  coord_cartesian(clip = "off") +  
-  scale_y_continuous(expand = c(0, 0)) + 
-  labs(tag="a", x = "", y = "# tweets") +
-  custom_plot() +
-  theme(
-    plot.margin = margin(t = 50, r = 5, b = 0, l = 5, unit = "pt"),
-    plot.tag = element_text(size = 12, face = "bold")
-  )
-
-news_plot <- ggplot(data = weekly_summary, 
-                  aes(x = week, 
-                      y = count_ng_domains)) +
-  geom_line(linewidth = 0.9) +
-  geom_vline(data = events, 
-             aes(xintercept = date), 
-             color = events$color, 
-             linetype = events$linetype,
-             alpha = 0.9) +
-  labs(
-    tag="b",
-    x = "",
-    y = "# news shared"
-  ) +
-  custom_plot()+
-  theme(plot.tag = element_text(size = 12, face = "bold"))
-
-score_plot <- ggplot(data = weekly_summary, 
-                     aes(x = week, y = mean_score)) +
-  geom_line(linewidth = 0.9) +
-  geom_vline(data = events, 
-             aes(xintercept = date), 
-             color = events$color, 
-             linetype = events$linetype, alpha = 0.9) +
-  labs(
-    tag="c",
-    x = "time in weeks",
-    y = "avg.\n trustworthiness"
-  ) +
-  custom_plot()+
-  theme(plot.tag = element_text(size = 12, face = "bold"))
-
-desc_plot <- (tweets_plot / news_plot / score_plot)
-```
-
-```{r}
-ggsave(file.path(dst, "desc_plot.pdf"), 
-          desc_plot, 
-          width = 9, height = 6)
-```
-
-## Figure 1: stacked time series plots of events and trustworthy vs untrustworthy news shared per week
-
-```{r}
-plot_data <- weekly_summary %>%
-  mutate(
-    prop_untrustworthy = (count_untrustworthy / count_ng_domains) * 100,
-    prop_trustworthy = (count_trustworthy / count_ng_domains) * 100
-    ) %>%
-  dplyr:::select(week, prop_trustworthy, prop_untrustworthy) %>%
-  pivot_longer(
-    cols = c(prop_trustworthy, prop_untrustworthy),
-    names_to = "type",
-    values_to = "proportion",
-    names_prefix = "prop_"
-  )
-
-prop_plot <- ggplot(plot_data, aes(x = week, y = proportion, fill = type)) +
-  geom_col(position = "stack", width = 7, alpha=0.8) + 
-  scale_fill_manual(
-    values = c("trustworthy" = "#4daf4a", "untrustworthy" = "#984ea3"),
-    labels = c("trustworthy", "untrustworthy")
-  ) +
-  labs(
-    x = "date",
-    y = "trustworthiness\n of news (%)",
-    tag="b") +
-  custom_plot()+
-  theme(
-    plot.margin = margin(t = 2, r = 5, b = 5, l = 5, unit = "pt"),
-    plot.tag = element_text(size = 12, face = "bold"),
-    legend.position = c(0.65, 1.1), 
-    legend.direction = "horizontal",
-    legend.title=element_blank(),
-    legend.text=element_text(size=9),
-    legend.background = element_rect(fill = "transparent", color = NA), 
-    legend.key.size = unit(0.25, "cm") 
-  )
-
-desc_prop_plot <- (tweets_plot / prop_plot)
-ggsave(file.path(dst, "desc_prop_plot.pdf"), 
-          desc_prop_plot, 
-          width = 6, height = 3.5)
-```
 
 ## Univariate ARIMA models and outlier detection
 
+First, we run univariate ARIMA models with an automated method that automatically fits an ARIMA model (auto.arima from the forecast package).
+
+
 ### Tweet count
+
 ```{r}
 # extract dates
 start_date <- min(daily_summary$day)
@@ -370,6 +120,13 @@ ts_count <- ts(daily_summary$tweet_count,
 arima_count <- auto.arima(ts_count, seasonal = TRUE)
 summary(arima_count)
 ```
+
+* There is a first-order differencing to remove a stochastic trend (d=1)
+* Daily volatility with corrections (AR/MA terms)
+* Weekly seasonality, probably weekday vs weekend
+* High absolute variability/day-to-day swings
+
+
 
 ```{r}
 checkresiduals(arima_count)
@@ -395,6 +152,7 @@ count_outliers <- tso(ts_count,
 summary(count_outliers)
 ```
 
+There are 21 outliers, let's look at them and transform the lags into dates:
 
 ```{r}
 # write function to add the date based on the date index
@@ -406,8 +164,15 @@ add_outlier_dates <- function(outlier_df, start_date) {
 count_df <- count_outliers$outliers
 count_df <- add_outlier_dates(count_df, start_date)
 print(count_df)
-write.csv(count_df, file.path(src, "Austria-Panel-Count-Outliers.csv"), row.names = FALSE)
 ```
+
+
+```{r}
+plot(count_outliers)
+```
+
+We can see that the tweet count has consistently gone up at two different points in time (the level shifts) and on a bunch of individual days.
+
 
 ### News count 
 
@@ -420,6 +185,12 @@ arima_domains <- auto.arima(ts_domains, seasonal=TRUE)
 summary(arima_domains)
 ```
 
+Overall, there's no differencing, the data is already stationary in its level (no integration). It follows strong 2-day cycles (AR2=0.82). 
+
+There are two SAR terms suggesting a strong weekly pattern, so what happens today is similar to what happened 1 and 2 weeks ago.
+
+So this could reflect bursty news cycles — e.g., certain news domains go viral mid-week and fade, with clear weekly rhythms in how news is shared.
+
 ```{r}
 checkresiduals(arima_domains)
 ```
@@ -427,6 +198,7 @@ checkresiduals(arima_domains)
 ```{r}
 fdGPH(residuals(arima_domains))
 ```
+Running some integration tests
 
 ```{r}
 adf_test <- ur.df(ts_domains, type = "trend")
@@ -475,6 +247,15 @@ domains_df <- add_outlier_dates(domains_df, start_date)
 print(domains_df)
 ```
 
+Nine outliers, including some temporary changes
+
+```{r}
+plot(domain_outliers)
+```
+
+* 2019-05-17: temporary change --> Ibiza-Skandal
+* 2021-10-06: temporary change --> Inseratenaffäre
+* 2021-11-16: temporary change --> mandatory vaccination campaign is announced
 
 ### Fraction of untrustworthy tweets
 
@@ -490,6 +271,9 @@ summary(arima_score)
 ```{r}
 checkresiduals(arima_score)
 ```
+
+Model quality is not so good, its hardest to predict. 
+
 
 *--> check for level shifts / more permanent changes*
 
@@ -508,11 +292,18 @@ score_df <- add_outlier_dates(score_df, start_date)
 print(score_df)
 ```
 
+Found 6 outliers!
+Including a level shifts and some temporary changes! Let's have a look:
 
 ```{r}
 plot(score_outliers)
 ```
 
+
+
+#### Intervention analysis
+
+So now, we want to understand the effect of the intervention and we have to create a dummy variable for this. 
 
 ```{r}
 score_intervention_index <- 1278
@@ -567,7 +358,7 @@ fc_ts <- ts(as.numeric(fc$mean),
 # plot everything together
 fitted_vals <- fitted(score_intervention)
 
-pdf(file.path(dst, "score_intervention.pdf"), width=9, height=4.5)
+pdf(file.path(dst, "figures/score_intervention.pdf"), width=9, height=4.5)
 plot(ts_score, 
      col = "black", 
      lwd = 1, 
@@ -622,14 +413,22 @@ summary(arima_anger)
 checkresiduals(arima_anger)
 ```
 
+Residual diagnostics show some outliers but overall the model fits well/has predictable patterns
+
+
 ```{r}
+# ARIMA orders for tso() taken from the auto.arima fit (previously hard-coded)
+tso_args <- function(fit) {
+  o <- arimaorder(fit)
+  seas <- if (length(o) >= 6) o[4:6] else c(0, 0, 0)
+  list(order = unname(o[1:3]), seasonal = list(order = unname(seas), period = 7))
+}
+
 # with tso() from tsoutliers
 anger_outliers <- tso(ts_anger, 
                       types = c("AO", "LS", "TC"),
                       tsmethod = "arima",
-                      args.tsmethod = list(order = c(4,1,4),
-                                           seasonal = list(order = c(1,0,1),
-                                                           period = 7))
+                      args.tsmethod = tso_args(arima_anger)
                       )
 
 anger_df <- anger_outliers$outliers
@@ -637,6 +436,7 @@ anger_df <- add_outlier_dates(anger_df, start_date)
 print(anger_df)
 ```
 
+Found a lot of TC outliers but no level shifts.
 
 ### Fear
 
@@ -650,25 +450,58 @@ arima_fear <- auto.arima(ts_fear, seasonal=TRUE)
 summary(arima_fear)
 ```
 
+* fear levels are mostly influenced by what happened yesterday: its sticky  and sustains high
+* strong immediate reversal at MA(1), then gradually returns
+* doesn't have weekly rhythms like anger 
 
 ```{r}
 checkresiduals(arima_fear)
 ```
+
+Residuals are centered around zero with stable variance and two peaks. ACF plot shows that spikes are mostly within the confidence interval. The histogram shows a tail.
 
 
 ```{r}
 fear_outliers <- tso(ts_fear, 
                      types = c("AO", "LS", "TC"),
                      tsmethod = "arima",
-                    args.tsmethod = list(order = c(1,1,3),
-                                           seasonal = list(order = c(0,0,2),
-                                                           period = 7))
+                     args.tsmethod = tso_args(arima_fear)
                      ) 
 
 fear_df <- fear_outliers$outliers
 fear_df <- add_outlier_dates(fear_df, start_date)
 print(fear_df)
 ```
+
+There's a level shift at index 660 (first submission: all languages, Q3; check for the revised series).
+
+### Disgust
+
+```{r, eval = DISGUST}
+ts_disgust <- ts(daily_summary$prop_disgust,
+                 start = c(start_year, start_day),
+                 frequency = 7)
+
+arima_disgust <- auto.arima(ts_disgust, seasonal = TRUE)
+summary(arima_disgust)
+checkresiduals(arima_disgust)
+```
+
+```{r, eval = DISGUST}
+disgust_outliers <- tso(ts_disgust,
+                        types = c("AO", "LS", "TC"),
+                        tsmethod = "arima",
+                        args.tsmethod = tso_args(arima_disgust))
+
+disgust_df <- add_outlier_dates(disgust_outliers$outliers, start_date)
+print(disgust_df)
+```
+
+
+Explanation of types: 
+AO = additive outlier; one-day peak without any lasting effects
+LS = level shift; a permanent change in the time series
+TC = temporary change; a sudden change with short-term effects 
 
 
 ## Save tables
@@ -707,13 +540,14 @@ create_arima_table <- function(arima_model,variable_name) {
           linesep = "",
           digits=3)
   
-  out <- file.path(dst, paste0("arima_", variable_name, ".tex"))
+  out <- file.path(dst, paste0("tables/arima_", variable_name, ".tex"))
   writeLines(as.character(latex_table), out)
   
   return(complete_table)
 }
 
 count_table <- create_arima_table(arima_count, "count")
+count_table
 ```
 
 
@@ -752,8 +586,9 @@ latex_table <- complete_table %>%
           linesep = "",
           digits=3)
   
-out <- file.path(dst, "score_intervention.tex")
+out <- file.path(dst, "tables/score_intervention.tex")
 writeLines(as.character(latex_table), out)
+complete_table
 ```
 
 
@@ -761,10 +596,66 @@ writeLines(as.character(latex_table), out)
 news_arima_table <- create_arima_table(arima_domains, "news")
 anger_arima_table <- create_arima_table(arima_anger, "anger")
 fear_arima_table <- create_arima_table(arima_fear, "fear")
+if (DISGUST) disgust_arima_table <- create_arima_table(arima_disgust, "disgust")
 ```
 
-## Run all of the above
+
+## Hashtag analysis of outliers (restricted data)
+
+NOTE: This section needs `Austria-Panel-Daily-Hashtags.csv` (daily hashtag lists from
+`1c-pull_hashtags.py`). The file contains tweet content and is **not part of the public data
+release**, so this section is skipped when the file is missing. It produces `tables/outliers.tex`
+(top hashtags on the tweet-count outlier days found above).
 
 ```{r}
-# run all the above code
+HAS_HASHTAGS <- file.exists(file.path(src, "Austria-Panel-Daily-Hashtags.csv"))
+if (!HAS_HASHTAGS) message("Austria-Panel-Daily-Hashtags.csv not found (not released): skipping the hashtag outlier table.")
+```
+
+```{r, eval = HAS_HASHTAGS}
+hashtags_df <- read.csv(file.path(src, "Austria-Panel-Daily-Hashtags.csv"))
+```
+
+```{r, eval = HAS_HASHTAGS}
+top_3_per_day <- hashtags_df %>%
+  mutate(hashtag_list = str_split(hashtags, ",")) %>%
+  rowwise() %>%
+  mutate(
+    top_3 = list(
+      hashtag_list %>%
+        table() %>%
+        sort(decreasing = TRUE) %>%
+        names() %>%
+        head(3)
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(top_3 = map(top_3, ~ if(length(.x) < 3) c(.x, rep(NA, 3 - length(.x))) 
+                              else .x)) %>%
+  unnest_wider(top_3, names_sep = "_") %>%
+  rename(top_1 = top_3_1, top_2 = top_3_2, top_3 = top_3_3)
+
+```
+
+```{r, eval = HAS_HASHTAGS}
+top_3_per_day$day <- as.Date(top_3_per_day$day)
+count_df <- left_join(
+                      count_df,
+                      top_3_per_day, by="day")%>%
+  filter(!format(day, "%m-%d") %in% c("12-24", "12-31"))%>%
+  mutate(hashtags = paste(top_1, top_2, top_3, sep = ",")) %>%
+  dplyr:::select(-top_1, -top_2, -top_3)
+count_df
+```
+
+```{r, eval = HAS_HASHTAGS}
+latex_table <- count_df%>%
+    dplyr:::select(day,type, coefhat, tstat, hashtags)%>%
+    mutate(hashtags = gsub("مهسا_امینی", "MahsaAmini", hashtags, fixed = TRUE)) %>%
+    kable(format = "latex",
+          booktabs=TRUE,
+          linesep = "")
+  
+out <- file.path(dst, "tables/outliers.tex")
+writeLines(as.character(latex_table), out)
 ```

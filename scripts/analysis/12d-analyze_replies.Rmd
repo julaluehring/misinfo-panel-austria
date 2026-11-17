@@ -1,17 +1,12 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Analyse the reply network structure: summary statistics, backbone visualisation,
-#         and separate networks for untrustworthy vs. trustworthy news supersharers.
-#         Produces Figure S18 and Table S23 (network statistics comparison).
-# Input:  data/Austria-Panel-Network-Edges.csv.gz       (output of 12a-pull_replies.py)
-#         data/Austria-Panel-Network-Nodes.csv.gz       (output of 12a-pull_replies.py)
-#         data/Austria-Panel-Network-Edges-Internal.csv (output of 12b-pull_replies_internal.py)
-#         data/Austria-Panel-Network-Nodes-Internal.csv (output of 12b-pull_replies_internal.py)
-#         data/Austria-Panel-Supersharers.csv           (output of 11-analyze_supersharers.Rmd)
-#         data/users/reply_analysis_summary.csv         (output of 12a-pull_replies.py)
-# Output: output/figures/edge_node_distributions.pdf
-#         output/figures/combined_supersharer_networks.png
-#         output/tables/network_comparison.tex
-#         output/tables/replies_latex.tex
+<!--
+Task:   Compare the reply networks of untrustworthy and trustworthy news supersharers.
+Input:  data/Austria-Panel-Network-*.csv(.gz) (from 12a/12b, not released)
+        data/Austria-Panel-Supersharers-Groups.csv
+        data/users/reply_analysis_summary.csv (from 12a, optional)
+Output: output/figures/edge_node_distributions.pdf, combined_supersharer_networks.png
+        output/tables/network_comparison.tex, replies_latex.tex
+Run:    As R Markdown or in terminal as Rscript -e 'rmarkdown::render("12d-analyze_replies.Rmd")'
+-->
 
 ```{r setup}
 options(scipen=999)
@@ -27,6 +22,8 @@ set.seed(636)
 ```{r paths}
 src <- "../../data"
 dst <- "../../output"
+dir.create(file.path(dst, "figures"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(dst, "tables"), recursive = TRUE, showWarnings = FALSE)
 ```
 
 ```{r custom_plot}
@@ -44,12 +41,19 @@ custom_plot <- function(plot) {
 ```
 
 ```{r load_summary}
-reply_summary <- read.csv(file.path(src, "users", "reply_analysis_summary.csv"))
-head(reply_summary)
+# written by 12a-pull_replies.py; only needed for the completeness-of-sample table
+# (replies_latex.tex), which does not depend on emotions or supersharers. If the file
+# is missing, the table is not written.
+summary_file <- file.path(src, "users", "reply_analysis_summary.csv")
+has_summary <- file.exists(summary_file)
+if (has_summary) {
+  reply_summary <- read.csv(summary_file)
+  head(reply_summary)
+} else message("reply_analysis_summary.csv not found: replies_latex.tex is not written")
 ```
 
 ## Summary of reply analysis
-```{r summary_table}
+```{r summary_table, eval = has_summary}
 reply_summary <- reply_summary %>%
   mutate(Metric = case_when(
     Metric == "Unique users replied to" ~ "Users replied to",
@@ -61,14 +65,14 @@ reply_summary <- reply_summary %>%
     TRUE ~ Metric
   ))
 
-# Table S24: Descriptive statistics for Austrian Twitter sample reply network
+# Table S10: Descriptive statistics for Austrian Twitter sample reply network
 replies_latex <- kable(reply_summary,
                     format = "latex",
                     booktabs = TRUE,
                     align = c("l", "c", "r"),
                     escape = TRUE)
 
-writeLines(as.character(replies_latex), file.path(dst,"replies_latex.tex"))
+writeLines(as.character(replies_latex), file.path(dst, "tables", "replies_latex.tex"))
 ```
 
 ## Network summary of all users
@@ -100,7 +104,7 @@ p_nodes <- ggplot(nodes, aes(x = n_replies_received + 1, fill = sample_status)) 
 
 p_combined <- p_edges + p_nodes + plot_layout(widths = c(1, 2))
 
-ggsave(file.path(dst, "edge_node_distributions.pdf"), p_combined,
+ggsave(file.path(dst, "figures", "edge_node_distributions.pdf"), p_combined,
        width = 6.5, height = 3.5)
 ```
 
@@ -112,7 +116,8 @@ nrow(i_edges); nrow(i_nodes)
 ```
 
 ```{r load_supersharers}
-supersharers <- read_csv(file.path(src, "Austria-Panel-Supersharers.csv"),
+# groups defined by news sharing only (11-analyze_supersharers.Rmd), independent of emotion features
+supersharers <- read_csv(file.path(src, "Austria-Panel-Supersharers-Groups.csv"),
                        col_types = cols(
                          author_id = col_double(),
                          group = col_factor(levels = c("Trustworthy", "Untrustworthy"))
@@ -186,11 +191,11 @@ p_trustworthy <- ggraph(g_trustworthy, layout = "fr") +
 p_combined_networks <- p_untrustworthy + p_trustworthy +
   plot_layout(widths = c(1, 2), ncol = 2)
 
-ggsave(file.path(dst, "combined_supersharer_networks.png"),
+ggsave(file.path(dst, "figures", "combined_supersharer_networks.png"),
        p_combined_networks, width = 6.5, height = 4)
 ```
 
-### Network statistics comparison (Table S23)
+### Network statistics comparison (Table S9)
 ```{r network_stats}
 compute_network_stats <- function(g, network_name) {
   n_nodes <- vcount(g)
@@ -205,7 +210,7 @@ compute_network_stats <- function(g, network_name) {
   g_gcc <- induced_subgraph(g, gcc_nodes)
   transitivity_global <- transitivity(g, type = "global")
   avg_path_length <- if (vcount(g_gcc) > 0 && ecount(g_gcc) > 0)
-    mean_distance(g_gcc, directed = TRUE) else NA
+    mean_distance(g_gcc, directed = TRUE, weights = NA) else NA
 
   data.frame(
     Network = network_name,
@@ -256,7 +261,7 @@ summary_table <- data.frame(
   )
 )
 
-# Table S23: Network statistics comparison (untrustworthy vs. trustworthy supersharers)
+# Table S9: Network statistics comparison (untrustworthy vs. trustworthy supersharers)
 summary_latex <- kable(summary_table,
                       format = "latex",
                       booktabs = TRUE,
@@ -264,5 +269,5 @@ summary_latex <- kable(summary_table,
                       escape = TRUE)
 
 writeLines(as.character(summary_latex),
-           file.path(dst,  "network_comparison.tex"))
+           file.path(dst, "tables", "network_comparison.tex"))
 ```

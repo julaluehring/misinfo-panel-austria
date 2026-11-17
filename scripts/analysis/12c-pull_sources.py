@@ -1,11 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Build the domain co-sharing network among misinformation supersharers.
-#         Creates nodes (domains) and edges (co-shared by same user).
-# Input:  <DATA_DIR>/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz
-#         <DATA_DIR>/Austria-Panel-Supersharers.csv  (output of 11-analyze_supersharers.Rmd)
-# Output: <DATA_DIR>/Austria-Panel-Source-Nodes.csv
-#         <DATA_DIR>/Austria-Panel-Source-Edges.csv
-# Usage:  python 12c-pull_sources.py <DATA_DIR>
+# Task:   Build the domain co-sharing network among the supersharers.
+# Input:  data/Austria-Panel-Tweets-Domains-PO-Dynamic.csv.gz (not released)
+#         data/Austria-Panel-Supersharers.csv (from 11-analyze_supersharers.Rmd)
+# Output: data/Austria-Panel-Source-{Nodes,Edges}.csv (not released)
+# Run:    python 12c-pull_sources.py ../../data
 
 import polars as pl
 import sys

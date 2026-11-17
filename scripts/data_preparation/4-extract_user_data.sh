@@ -1,12 +1,11 @@
 #!/bin/bash
-# ===== SCRIPT OVERVIEW =====
-# Task:   Extract user metadata from gzipped Brandwatch JSON exports to per-file CSVs using jq.
-# Input:  JSONfiles/*.json.gz
-# Output: UserCSVfiles/*.csv.gz is one file per JSON input; columns: author_id, username, name, verified, followers_count, following_count, tweet_count, created_at, description, location, expanded_urls
-# Usage:  bash 4-extract_user_data.sh
+# Task:   Extract user metadata from the Brandwatch JSON exports with jq, one CSV per input file.
+# Input:  data/JSONfiles/*.json.gz (not released)
+# Output: data/UserCSVfiles/*.csv.gz
+# Run:    bash 4-extract_user_data.sh
 
-input_dir="/misinfo-panel-austria/data/JSONfiles"
-output_dir="/misinfo-panel-austria/data/UserCSVfiles"
+input_dir="../../data/JSONfiles"
+output_dir="../../data/UserCSVfiles"
 
 for input_file in "$input_dir"/*.json.gz; do
 

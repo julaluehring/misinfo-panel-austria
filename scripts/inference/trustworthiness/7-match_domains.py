@@ -1,10 +1,8 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Match extracted tweet domains against the NewsGuard domain list using
-#         fuzzy matching (rapidfuzz, similarity threshold 97).
-# Input:  <DATA_DIR>/urls/  (concatenated URL files from step 3)
-#         NewsGuard domain list (expected in <DATA_DIR>/newsguard/)
-# Output: <DATA_DIR>/urls/matched_domains_all.csv.gz
-# Usage:  python 7-match_domains.py <DATA_DIR>
+# Task:   Match tweet domains to NewsGuard domains (exact, registered-domain and fuzzy matching).
+# Input:  data/urls/unraveled_urls_all.csv.gz, unshortened_urls_r2.csv.gz (not released)
+#         data/newsguard/domains_unique.csv (licensed, not released)
+# Output: data/urls/matched_domains_all.csv.gz (not released)
+# Run:    python 7-match_domains.py ../../../data
 
 import pandas as pd
 from os.path import join

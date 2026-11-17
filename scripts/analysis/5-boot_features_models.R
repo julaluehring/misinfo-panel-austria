@@ -1,54 +1,45 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Bootstrap logistic regression models testing whether user-level emotion
-#         dynamics features (baseline, variability, instability, inertia) predict
-#         news sharing, misinformation sharing, and partisan sharing.
-#         All predictors are z-normalised; R=1000 bootstrap replications, 20 cores.
-# Input:  data/Austria-Panel-Users-Features-Tweet.csv
-# Output: users/user_models_tweet_boot.rds  (list of boot objects for all model variants)
-# Usage:  Rscript 5-boot_features_models.R
+# Task:   Bootstrapped logistic regressions (1000 replicates): do the emotion features predict
+#         sharing news, untrustworthy news and partisan news?
+# Input:  data/Austria-Panel-Users-Features-Tweet-<lang>.csv
+# Output: output/users/user_models_tweet_boot_<lang>[_activity][_disgust].rds
+# Run:     As R script or in terminal as Rscript 5-boot_features_models.R [lang] [controls] [emotions]   # defaults: de_en none main; alternatives: de | activity | disgust
 
 library(readr)
 library(dplyr)
 library(boot)
 
-R <- 10 # test bootstrap samples
-n_cores <- 20
+args     <- commandArgs(trailingOnly = TRUE)
+lang     <- if (length(args) >= 1) args[1] else "de_en"
+controls <- if (length(args) >= 2) args[2] else "none"
+emoset   <- if (length(args) >= 3) args[3] else "main"
+stopifnot(lang %in% c("de_en", "de", "all"), controls %in% c("none", "activity"),
+          emoset %in% c("main", "disgust"))
+
 src <- "../../data"
 dst <- "../../output"
-file <- "Austria-Panel-Users-Features-Tweet.csv"
+file <- paste0("Austria-Panel-Users-Features-Tweet-", lang, ".csv")
+emotions <- c("anger", "fear", if (emoset == "disgust") "disgust")
+feature_types <- c(base = "baseline", var = "variability",
+                   inst = "instability", inertia = "inertia")
+outcomes <- c(news = "shares_news", misinfo = "shares_untrustworthy",
+              partisan = "shares_biased")
 
 features <- read_csv(file.path(src, file),
-                     col_types = cols(
-                       .default = col_double()
-                     )) 
-
+                     col_types = cols(author_id = col_character(),
+                                      .default = col_double()))
 
 features$shares_news <- as.integer(features$n_news_shared > 0)
 features$shares_untrustworthy <- as.integer(features$n_untrustworthy_shared > 0)
 features$shares_biased <- as.integer(features$n_biased_shared > 0)
+features$log_n_scored <- log(features$n_scored)
 
+feature_cols <- as.vector(outer(emotions, feature_types, paste, sep = "_"))
+complete_features <- features[complete.cases(features[, c(unname(outcomes), feature_cols)]), ]
+cat(sprintf("lang = %s, controls = %s, emotions = %s: %d of %d users with complete features\n",
+            lang, controls, paste(emotions, collapse = "+"), nrow(complete_features), nrow(features)))
 
-complete_features <- features[complete.cases(features[, 
-                        c('shares_untrustworthy',  # shouldnt have NaNs but just in case
-                          'shares_news',
-                          'shares_biased',
-                          'anger_baseline', 
-                          'fear_baseline',
-                          'anger_variability',  # everything after this
-                          'fear_variability', # could have NaNs
-                          'anger_instability',  
-                          'fear_instability',
-                          'anger_inertia', 
-                          'fear_inertia')]), ]
-
-z_features <- complete_features %>%
-  mutate(across(c(anger_baseline, fear_baseline, 
-                  anger_variability, fear_variability,
-                  anger_instability, fear_instability,
-                  anger_inertia, fear_inertia),
-                ~as.numeric(scale(.))))
-
-df <- z_features
+df <- complete_features %>%
+  mutate(across(all_of(c(feature_cols, "log_n_scored")), ~ as.numeric(scale(.))))
 
 boot_stat <- function(data, indices, formula) {
   d <- data[indices, ]
@@ -56,113 +47,26 @@ boot_stat <- function(data, indices, formula) {
   return(coef(model))
 }
 
-# Bootstrap for NEWS models
-print("Running bootstrap for NEWS models...")
-boot_news_base <- boot(data = df,
-                       statistic = boot_stat,
-                       R = R,
-                       parallel = "multicore", 
-                       ncpus = n_cores,     
-                       formula = shares_news ~ anger_baseline + fear_baseline)
+R <- 1000 # number of bootstrap samples
+n_cores <- 20
+set.seed(636)
 
-boot_news_var <- boot(data = df,
-                      statistic = boot_stat,
-                      R = R,
-                      parallel = "multicore", 
-                      ncpus = n_cores,    
-                      formula = shares_news ~ anger_variability + fear_variability)
+boot_objects <- list()
+for (o in names(outcomes)) {
+  cat(sprintf("Running bootstrap for %s models...\n", toupper(o)))
+  for (f in names(feature_types)) {
+    rhs <- paste(paste(emotions, feature_types[[f]], sep = "_"), collapse = " + ")
+    if (controls == "activity") rhs <- paste(rhs, "+ log_n_scored")
+    fml <- as.formula(paste(outcomes[[o]], "~", rhs))
+    boot_objects[[paste("boot", o, f, sep = "_")]] <-
+      boot(data = df, statistic = boot_stat, R = R,
+           parallel = "multicore", ncpus = n_cores, formula = fml)
+  }
+}
 
-boot_news_inst <- boot(data = df,
-                       statistic = boot_stat,
-                       R = R,
-                       parallel = "multicore", 
-                       ncpus = n_cores,    
-                       formula = shares_news ~ anger_instability + fear_instability)
-
-boot_news_inertia <- boot(data = df,
-                          statistic = boot_stat,
-                          R = R, 
-                          parallel = "multicore", 
-                          ncpus = n_cores,
-                          formula = shares_news ~ anger_inertia + fear_inertia)
-
-# Bootstrap for UNTRUSTWORTHY models
-print("Running bootstrap for UNTRUSTWORTHY models...")
-boot_misinfo_base <- boot(data = df,
-                          statistic = boot_stat,
-                          R = R,
-                          parallel = "multicore", 
-                          ncpus = n_cores,
-                          formula = shares_untrustworthy ~ anger_baseline + fear_baseline)
-
-boot_misinfo_var <- boot(data = df,
-                         statistic = boot_stat,
-                         R = R,
-                         parallel = "multicore", 
-                         ncpus = n_cores,
-                         formula = shares_untrustworthy ~ anger_variability + fear_variability)
-
-boot_misinfo_inst <- boot(data = df,
-                          statistic = boot_stat,
-                          R = R,
-                          parallel = "multicore", 
-                          ncpus = n_cores,
-                          formula = shares_untrustworthy ~ anger_instability + fear_instability)
-
-boot_misinfo_inertia <- boot(data = df,
-                             statistic = boot_stat,
-                             R = R,
-                             parallel = "multicore",
-                             ncpus = n_cores,
-                             formula = shares_untrustworthy ~ anger_inertia + fear_inertia)
-
-# Bootstrap for PARTISAN models
-print("Running bootstrap for PARTISAN models...")
-boot_partisan_base <- boot(data = df,
-                           statistic = boot_stat,
-                           R = R,
-                           parallel = "multicore", 
-                           ncpus = n_cores,
-                           formula = shares_biased ~ anger_baseline + fear_baseline)
-
-boot_partisan_var <- boot(data = df,
-                          statistic = boot_stat,
-                          R = R,
-                          parallel = "multicore", 
-                          ncpus = n_cores,
-                          formula = shares_biased ~ anger_variability + fear_variability)
-
-boot_partisan_inst <- boot(data = df,
-                           statistic = boot_stat,
-                           R = R,
-                           parallel = "multicore", 
-                           ncpus = n_cores,
-                           formula = shares_biased ~ anger_instability + fear_instability)
-
-boot_partisan_inertia <- boot(data = df,
-                              statistic = boot_stat,
-                              R = R,
-                              parallel = "multicore", 
-                              ncpus = n_cores,
-                              formula = shares_biased ~ anger_inertia + fear_inertia)
-
-
-# dump bootstrap results
-print("Saving bootstrap results...")
-boot_objects <- list(
-  boot_news_base = boot_news_base,
-  boot_news_var = boot_news_var,
-  boot_news_inst = boot_news_inst,
-  boot_news_inertia = boot_news_inertia,
-  boot_misinfo_base = boot_misinfo_base,
-  boot_misinfo_var = boot_misinfo_var,
-  boot_misinfo_inst = boot_misinfo_inst,
-  boot_misinfo_inertia = boot_misinfo_inertia,
-  boot_partisan_base = boot_partisan_base,
-  boot_partisan_var = boot_partisan_var,
-  boot_partisan_inst = boot_partisan_inst,
-  boot_partisan_inertia = boot_partisan_inertia
-)
-
-saveRDS(boot_objects, "users/user_models_tweet_boot.rds")
-print("Bootstrap analysis completed.")
+dir.create(file.path(dst, "users"), recursive = TRUE, showWarnings = FALSE)
+out <- file.path(dst, "users", paste0("user_models_tweet_boot_", lang,
+                                 if (controls == "activity") "_activity" else "",
+                                 if (emoset == "disgust") "_disgust" else "", ".rds"))
+saveRDS(boot_objects, out)
+cat("Bootstrap analysis completed:", out, "\n")

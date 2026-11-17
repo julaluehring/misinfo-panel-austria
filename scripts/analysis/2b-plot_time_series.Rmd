@@ -1,0 +1,435 @@
+<!--
+Task:   Descriptive time series figures (Fig. 2, daily series, histograms).
+Input:  data/Austria-Panel-Daily-de_en.csv
+        data/newsguard/shared_domains.csv (not released; the domain plot is skipped without it)
+Output: output/figures/desc_prop_plot.pdf, desc_plot.pdf, desc_daily.pdf, trustworthiness_daily.pdf,
+        emotions_daily.pdf, vars_histograms.pdf, domains_plot.pdf
+Run:    As R Markdown or in terminal as Rscript -e 'rmarkdown::render("2b-plot_time_series.Rmd")'   # variants: LANG, DISGUST in the parameters chunk
+-->
+
+```{r setup, include=FALSE}
+library(readr)
+library(scales)
+library(tidyverse)
+library(dplyr)
+library(patchwork) # arrange grids
+library(forecast) # ARIMA
+library(tseries)
+library(TSA)
+library(vars) # VAR modeling
+library(lmtest)
+library(tsoutliers) #tsoutliers
+library(urca)  # ca.jo, ur.df, finland
+library(tsDyn) # VECM
+
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=999)
+```
+
+```{r parameters}
+src <- "../../data"
+dst <- "../../output"
+dir.create(file.path(dst, "figures"), recursive = TRUE, showWarnings = FALSE)
+LANG <- "de_en"   # de_en (main), de, all
+DISGUST <- FALSE  # FALSE (main), TRUE (robustness: + disgust; validation failed)
+tag  <- paste0(if (LANG == "de_en") "" else paste0("_", LANG), if (DISGUST) "_disgust" else "")
+```
+
+```{r custom plots}
+
+custom_plot <- function() {
+  theme_classic() +  
+    theme(
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text.x  = element_text(size = 11),
+      axis.text.y  = element_text(size = 11),
+      legend.title = element_text(size = 12),
+      legend.text  = element_text(size = 11)
+    )
+}
+
+knitr::opts_chunk$set(fig.width = 6, fig.height = 3)
+
+```
+
+# Exploration of time series data
+
+```{r}
+daily_summary <- read.csv(file.path(src, paste0("Austria-Panel-Daily-", LANG, ".csv")))
+head(daily_summary, 2)
+```
+
+```{r}
+daily_summary$day <- as.Date(daily_summary$day, format = "%Y-%m-%d")
+summary(daily_summary)
+```
+
+```{r}
+daily_summary <- daily_summary %>% arrange(day)
+head(daily_summary, 5)
+```
+
+```{r}
+start_date <- min(daily_summary$day)
+start_year <- year(start_date)
+start_day  <- yday(start_date)  # day of year for start
+```
+
+```{r}
+# create proportions
+daily_summary <- daily_summary %>%
+  mutate(
+    prop_news = (count_ng_domains / tweet_count) * 100,
+    prop_misinfo = ((count_caution + count_max_caution) / tweet_count) * 100,
+    prop_anger = (count_anger_065 / n_scored) * 100,
+    prop_fear = (count_fear_065 / n_scored) * 100,
+    prop_disgust = (count_disgust_065 / n_scored) * 100,
+    prop_right = (count_right / tweet_count) * 100,
+    prop_left = (count_left / tweet_count)*100
+  )
+
+proportions <- c("prop_news", "prop_misinfo", "prop_anger", "prop_fear",
+                 if (DISGUST) "prop_disgust", "prop_right", "prop_left")
+hist_labels <- c(prop_news = "News sharing (%)", prop_misinfo = "Untrustworthy news (%)",
+                 prop_anger = "Anger (%)", prop_fear = "Fear (%)", prop_disgust = "Disgust (%)",
+                 prop_right = "Right-leaning news (%)", prop_left = "Left-leaning news (%)")
+summary(daily_summary[, proportions])
+
+# untrustworthy news for the manuscript: daily share of all tweets and of all
+# news links (mean, SD, max), and pooled shares over the whole period
+daily_summary %>%
+  mutate(of_tweets = (count_caution + count_max_caution) / tweet_count * 100,
+         of_news   = (count_caution + count_max_caution) / count_ng_domains * 100) %>%
+  summarise(across(c(of_tweets, of_news), list(mean = mean, sd = sd, max = max))) %>%
+  round(3)
+with(daily_summary, round(c(
+  pooled_of_tweets = sum(count_caution + count_max_caution) / sum(tweet_count) * 100,
+  pooled_of_news   = sum(count_caution + count_max_caution) / sum(count_ng_domains) * 100), 3))
+```
+
+```{r, fig.width=6, fig.height=6}
+pdf(file.path(dst, paste0("figures/vars_histograms", tag, ".pdf")), width = 8, height = 8)
+par(mfrow = c(3,3), 
+    cex.main = 1.5,    
+    cex.lab = 1.3,    
+    cex.axis = 1.2) 
+
+for (p in proportions) {
+  var_mean <- mean(daily_summary[[p]], na.rm = TRUE)
+  
+  hist(daily_summary[[p]], 
+       main = paste(""),
+       xlab = hist_labels[[p]],
+       ylab = "",
+       col = "lightblue",
+       border = "black")
+  abline(v = var_mean, col = "red", lwd = 2)
+}
+dev.off()
+
+par(mfrow = c(1, 1))
+```
+
+```{r}
+p_count <- ggplot(daily_summary, aes(x = day, y = tweet_count)) +
+  geom_line() +
+  custom_plot()+
+  labs(tag="a", y="# tweets")+
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+
+p_news <- ggplot(daily_summary, aes(x = day, y = count_ng_domains)) +
+  geom_line() +
+  custom_plot()+
+  labs(tag="b", y="# news links")+
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+desc_daily <- (p_count / p_news)
+
+ggsave(file.path(dst, "figures/desc_daily.pdf"), 
+          desc_daily, 
+          width = 9, height = 4.5)
+```
+
+
+```{r}
+p_score <- ggplot(daily_summary, aes(x = day, y = mean_score)) +
+  geom_line() +
+  custom_plot()+
+  labs(tag="a", y="NewsGuard\n score")+
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+p_untrust <- ggplot(daily_summary, aes(x = day, y = prop_misinfo)) +
+  geom_line() +
+  custom_plot()+
+  labs(tag="b", y="untrustworthy\n links (%)")+
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+trustworthiness_daily <- (p_score / p_untrust)
+
+ggsave(file.path(dst, "figures/trustworthiness_daily.pdf"), 
+          trustworthiness_daily, 
+          width = 9, height = 4.5)
+```
+
+```{r}
+p_anger <- ggplot(daily_summary, 
+            aes(x = day, y = prop_anger)) +
+  geom_line() +
+  custom_plot()+
+  labs(tag="a", y="angry tweets (%)")+
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+p_fear<- ggplot(daily_summary, 
+                aes(x = day, y = prop_fear)) +
+  geom_line() +
+  custom_plot()+
+  labs(tag="b", y="fearful tweets (%)")+
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+p_disgust <- ggplot(daily_summary,
+                aes(x = day, y = prop_disgust)) +
+  geom_line() +
+  custom_plot()+
+  labs(tag="c", y="disgusted tweets (%)")+
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+emotions_daily <- if (DISGUST) (p_anger / p_fear / p_disgust) else (p_anger / p_fear)
+
+ggsave(file.path(dst, paste0("figures/emotions_daily", tag, ".pdf")), 
+          emotions_daily, 
+          width = 9, height = 4.5)
+```
+
+## Weekly averages
+```{r}
+# summarize per week to visualize
+daily_summary <- daily_summary%>%
+  mutate(
+    count_trustworthy = count_exceptions + count_generally_credible + count_high_credibility,
+    count_untrustworthy = count_max_caution + count_caution
+  )
+
+weekly_summary <- daily_summary %>%
+dplyr:::select(day, tweet_count, count_ng_domains, 
+               count_trustworthy, count_untrustworthy,
+               mean_score, mean_anger, mean_fear, mean_disgust) %>%
+  mutate(week = floor_date(day, "week")) %>%  # Create week column
+  group_by(week) %>%
+  summarise(
+    across(c(tweet_count, count_ng_domains, count_trustworthy, count_untrustworthy), sum, na.rm = TRUE),
+    across(c(mean_score, mean_anger, mean_fear, mean_disgust), mean, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+```
+
+```{r}
+domestic <- "gray42"
+global <- "black"
+
+events <- data.frame(
+  date = as.Date(c("2019-05-17", 
+                   "2020-03-12", 
+                   "2020-11-02", 
+                   "2021-01-06", 
+                   "2021-10-09", 
+                   "2022-02-24", 
+                   "2022-10-21")),
+  event = c("Ibiza scandal",  
+            "COVID-19 lockdown",
+            "Vienna attack",
+            "Capitol storming", 
+            "Advertisement scandal",
+            "Russian invasion\n of Ukraine",
+            "Woman, Life,\nFreedom protests"),
+  color = c(domestic, domestic, domestic, global, domestic, global, global),
+  linetype = c("dashed", "dashed", "dashed", "dotted", "dashed", "dotted", "dotted")
+)
+
+```
+
+```{r}
+max_tweets <- max(weekly_summary$tweet_count, na.rm = TRUE)
+
+tweets_plot <- ggplot(data=weekly_summary, 
+                      aes(x = week, 
+                          y = tweet_count)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(data=events, 
+             aes(xintercept = date), 
+             color = events$color, 
+             linetype = events$linetype,
+             alpha = 0.9) +
+  ggrepel:::geom_text_repel(
+                  data=events, 
+                  aes(x = date-50, 
+                      y = max_tweets * 1.02, 
+                      label = event),
+                  color = events$color, 
+                  size = 2.88,
+                  hjust=0, 
+                  direction = "y", 
+                  nudge_x=0,
+                  lineheight=0.7,
+                  force=3, 
+                  ylim = c(max_tweets * 0.95, 
+                           max_tweets * 1.45),  
+                  segment.color = "transparent") + 
+  coord_cartesian(clip = "off") +  
+  scale_y_continuous(expand = c(0, 0)) + 
+  labs(tag="a", x = "", y = "# tweets") +
+  custom_plot() +
+  theme(
+    plot.margin = margin(t = 50, r = 5, b = 0, l = 5, unit = "pt"),
+    plot.tag = element_text(size = 12, face = "bold")
+  )
+
+news_plot <- ggplot(data = weekly_summary, 
+                  aes(x = week, 
+                      y = count_ng_domains)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(data = events, 
+             aes(xintercept = date), 
+             color = events$color, 
+             linetype = events$linetype,
+             alpha = 0.9) +
+  labs(
+    tag="b",
+    x = "",
+    y = "# news shared"
+  ) +
+  custom_plot()+
+  theme(plot.tag = element_text(size = 12, face = "bold"))
+
+score_plot <- ggplot(data = weekly_summary, 
+                     aes(x = week, y = mean_score)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(data = events, 
+             aes(xintercept = date), 
+             color = events$color, 
+             linetype = events$linetype, alpha = 0.9) +
+  labs(
+    tag="c",
+    x = "time in weeks",
+    y = "avg.\n trustworthiness"
+  ) +
+  custom_plot()+
+  theme(plot.tag = element_text(size = 12, face = "bold"))
+
+desc_plot <- (tweets_plot / news_plot / score_plot)
+```
+
+```{r}
+ggsave(file.path(dst, "figures/desc_plot.pdf"), 
+          desc_plot, 
+          width = 9, height = 6)
+```
+
+```{r}
+plot_data <- weekly_summary %>%
+  mutate(
+    prop_untrustworthy = (count_untrustworthy / count_ng_domains) * 100,
+    prop_trustworthy = (count_trustworthy / count_ng_domains) * 100
+    ) %>%
+  dplyr:::select(week, prop_trustworthy, prop_untrustworthy) %>%
+  pivot_longer(
+    cols = c(prop_trustworthy, prop_untrustworthy),
+    names_to = "type",
+    values_to = "proportion",
+    names_prefix = "prop_"
+  )
+
+prop_plot <- ggplot(plot_data, aes(x = week, y = proportion, fill = type)) +
+  geom_col(position = "stack", width = 7, alpha=0.8) + 
+  scale_fill_manual(
+    values = c("trustworthy" = "#4daf4a", "untrustworthy" = "#984ea3"),
+    labels = c("trustworthy", "untrustworthy")
+  ) +
+  labs(
+    x = "date",
+    y = "trustworthiness\n of news (%)",
+    tag="b") +
+  custom_plot()+
+  theme(
+    plot.margin = margin(t = 2, r = 5, b = 5, l = 5, unit = "pt"),
+    plot.tag = element_text(size = 12, face = "bold"),
+    legend.position = c(0.65, 1.1), 
+    legend.direction = "horizontal",
+    legend.title=element_blank(),
+    legend.text=element_text(size=9),
+    legend.background = element_rect(fill = "transparent", color = NA), 
+    legend.key.size = unit(0.25, "cm") 
+  )
+
+desc_prop_plot <- (tweets_plot / prop_plot)
+ggsave(file.path(dst, "figures/desc_prop_plot.pdf"), 
+          desc_prop_plot, 
+          width = 6, height = 3.5)
+```
+
+
+
+## Domain analysis
+The NewsGuard data is proprietary so the below data cannot be shared. 
+
+# Domain ratings
+```{r}
+HAS_NG <- file.exists(file.path(src, "newsguard/shared_domains.csv"))
+if (!HAS_NG) message("newsguard/shared_domains.csv not found (restricted NewsGuard data): skipping domain section.")
+```
+
+```{r, eval = HAS_NG}
+domain_tweets <- read.csv(file.path(src, "newsguard/shared_domains.csv"), sep=",")
+nrow(domain_tweets)
+```
+
+```{r, eval = HAS_NG}
+domain_tweets <- domain_tweets %>%
+  filter(file_month <= "2023-04")
+nrow(domain_tweets)
+```
+
+```{r, eval = HAS_NG, fig.height=2.5, fig.width=6}
+domain_tweets$file_month <- as.Date(paste0(domain_tweets$file_month, "-01"))
+domain_agg <- domain_tweets %>%
+  group_by(file_month) %>%
+  summarise(
+    mean_score = mean(Score, na.rm = TRUE),
+    n_untrustworthy = n_distinct(Domain[Score < 60]),
+    n_sources = n_distinct(Domain),
+    fraction_untrustworthy = (n_untrustworthy / n_sources)*100
+  )
+
+domains_plot <- ggplot(domain_agg, aes(x = file_month)) +
+  geom_line(aes(y = mean_score, color = "mean")) +
+  geom_line(aes(y = 75 + (fraction_untrustworthy / 30)*10, 
+                color = "fraction")) +
+  scale_y_continuous(
+    name = "avg. trustworthiness",
+    limits = c(75, 85),
+    sec.axis = sec_axis(~ (. - 75) / 10* 30,
+                        name = "domains < 60 (%)",
+                        breaks = seq(0,30, by=10))
+  ) +
+  scale_color_manual(values = c("mean" = "black", "fraction" = "gray")) +
+  labs(x = "time in months", color = "") +
+  custom_plot()
+
+plot(domains_plot)
+```
+
+```{r, eval = HAS_NG}
+ggsave(file.path(dst, "figures/domains_plot.pdf"), 
+          domains_plot, 
+          width = 9, height = 3)
+```
+
+
+```{r, eval = HAS_NG}
+ggplot(domain_agg, aes(x = file_month,y = n_sources)) +
+  geom_line() +
+  labs(x = "time in months", y= "sources (n)")+
+  custom_plot()
+```

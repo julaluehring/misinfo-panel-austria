@@ -1,11 +1,9 @@
-# ===== SCRIPT OVERVIEW =====
-# Task:   Extract and normalise domains from tweet expanded_urls.
-#         Separates shortened URLs (e.g. bit.ly) from directly resolved domains.
-# Input:  <DATA_DIR>/Austria-Panel-Tweets.csv.gz  (column: expanded_urls)
-#         ./url-shorteners/list.txt         (list of known URL shortener domains)
-# Output: <DATA_DIR>/urls/unshortened_urls_r2.csv.gz
-#         <DATA_DIR>/urls/shortened_urls_r2.csv.gz
-# Usage:  python 1-extract_urls.py <DATA_DIR>
+# Task:   Extract domains from tweet URLs and separate shortened links (e.g. bit.ly).
+# Input:  data/Austria-Panel-Tweets.csv.gz (not released)
+#         url-shorteners/list.txt
+# Output: data/urls/unshortened_urls_r2.csv.gz
+#         data/urls/shortened_urls_r2.csv.gz
+# Run:    python 1-extract_urls.py ../../../data
 
 import numpy as np
 from os.path import join

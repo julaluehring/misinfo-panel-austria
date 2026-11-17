@@ -3,13 +3,14 @@ title: "User Cohort Analysis"
 output: html_document
 ---
 
-# ===== SCRIPT OVERVIEW =====
-# Task:   Analyse whether the 2022 structural breaks in untrustworthy news sharing
-#         are driven by new accounts joining vs. behaviour change in existing users.
-#         Produces Figure S10.
-# Input:  data/Austria-Panel-User-Statistics.csv  (output of 10-aggregate_user_stats.py)
-#         data/Austria-Panel-Users-Daily.csv.gz   (output of 4-extract_features.py)
-# Output: output/figures/user_joins.pdf  (Figure S10)
+<!--
+Task:   Are the 2022 breaks in untrustworthy news sharing driven by new accounts or by existing
+        users?
+Input:  data/Austria-Panel-User-Statistics.csv
+        data/Austria-Panel-Users-Daily.csv.gz
+Output: output/figures/user_joins.pdf
+Run:    As R Markdown or in terminal as Rscript -e 'rmarkdown::render("13-analyze_cohorts.Rmd")'
+-->
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
@@ -26,6 +27,7 @@ set.seed(636)
 ```{r paths}
 src <- "../../data"
 dst <- "../../output"
+dir.create(file.path(dst, "figures"), recursive = TRUE, showWarnings = FALSE)
 ```
 
 ```{r custom_plot}
@@ -136,7 +138,7 @@ p_decomposition <- ggplot(activity_by_type %>% filter(day >= as.Date("2022-01-01
   theme(legend.position = "bottom",
         plot.title = element_text(size = 16, face = "bold"))
 
-ggsave(file.path(dst, "user_joins.pdf"),
+ggsave(file.path(dst, "figures/user_joins.pdf"),
        p_joins / p_ages / p_activity / p_decomposition,
        width = 6.5, height = 6.5, dpi = 300)
 ```
